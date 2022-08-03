@@ -1,0 +1,6 @@
+amuse==2022.6.0
+amuse_huayno==2022.6.0
+matplotlib==3.5.2
+numpy==1.23.1
+seaborn==0.11.2
+tqdm==4.64.0

@@ -1,3 +1,13 @@
+### Custom
+# Plots files
+plots/
+# All data files, as they can get quite large!
+al26-mass.csv
+al26-ratio.csv
+al26-wind-rate.csv
+fe60-mass.csv
+fe60-ratio.csv
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
