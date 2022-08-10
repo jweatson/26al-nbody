@@ -7,6 +7,7 @@ al26-ratio.csv
 al26-wind-rate.csv
 fe60-mass.csv
 fe60-ratio.csv
+binev.data
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

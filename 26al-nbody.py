@@ -55,7 +55,7 @@ def evolveSimulation(cluster,gravity,stellar,t_f,bar):
   Evolve simulation with an adaptive timestep
 
   Timestep calculation:
-  - Timestep is separate from nbody step, which is handled by the numerical solver
+  - Timestep is separate from N-body step, which is handled by the numerical solver
   - Timestep is adaptive, and evolves from two main conditions
     - Proximity and sudden intercept velocity with massive stars, timestep is determined by
       the determining the first low-mass star to collide with a massive star assuming it was
@@ -63,16 +63,23 @@ def evolveSimulation(cluster,gravity,stellar,t_f,bar):
       for good measure. This is a fairly fast calculation but can change timestep effectively
       for close encounters
     - If timestep exceeds expected next plot interval, use that instead
+  
+  Simulation synchronisation:
+  - Synchronisation is manual, as there were some issues in getting this to work properly
+  - Instead, synchronisation only occurs when it is explicitly needed:
+    - Mass
+    - Position
+    - Supernova kick velocity
 
   Routines, in order of execution:
   - Determine timestep
   - Check if plotting should occur/simulation should finish
-  - Evolve NBody
+  - Evolve N-body
     - Update positions of stars over tiemstep
-    - Resolve supernova kick
+    - Resolve supernova kick from previous step
   - Evolve stars
-    - Adjust masses, synchronise with nbody for next step
-    - Check to see if star has gone supernova, sychronise with nbody
+    - Adjust masses, synchronise with N-body for next step
+    - Check to see if star has gone supernova, sychronize kick with N-body
   - Evolve discs
     - Check for wind/supernovae injection
     - Calculate mixing fractions, add mass
@@ -92,7 +99,7 @@ def evolveSimulation(cluster,gravity,stellar,t_f,bar):
     - Disc parameters, radius, lifetime, whether they are extant
     - Storage of mass injection
     - Supernova kick confirmation
-  - gtellar: SeBa stellar evolution simulation, which handles:
+  - stellar: SeBa stellar evolution simulation, which handles:
     - Stellar evolution, of course!
     - Evolutionary phase (MS, PMS, SNRelic, etc.)
     - Mass loss rate
@@ -117,9 +124,9 @@ def evolveSimulation(cluster,gravity,stellar,t_f,bar):
   dt = t_f / n_plot
   # Calculate safe timestep, based on proximity of stars and their current velocities
   for i in hm_id:
-    hm_star = cluster[i]
+    hm_star = gravity.particles[i]
     for j in lm_id:
-      lm_star = cluster[j]
+      lm_star = gravity.particles[j]
       d = calcStarDistance(hm_star,lm_star)
       # If star is on a direct intercept course, calculate time to intercept 
       v_int = np.sqrt((lm_star.vx)**2 + (lm_star.vy)**2 + (lm_star.vz)**2)
@@ -151,118 +158,98 @@ def evolveSimulation(cluster,gravity,stellar,t_f,bar):
   ### N-BODY ROUTINES
   # Now, evolve the N-body simulation (most time consuming section of iteration)
   gravity.evolve_model(t_new)
-  ### N-BODY CLEANUP
-  # Sychronise positions with cluster & stellar for next run
-  gravity.particles.synchronize_to(cluster)
-  gravity.particles.synchronize_to(stellar.particles)
 
   ### STELLAR EVOLUTION ROUTINES
-  # Evolve stars according to SEBA model
+  # First, evolve stars according to SEBA model
   stellar.evolve_model(t_new)
   ### STELLAR EVOLUTION - SUPERNOVA
   # Add kick velocity to stars gone supernova
   # This has to use array indexing because it requires participation from multiple datasets
-
   sn_id = []
   for i in hm_id:
     vx_k = stellar.particles[i].natal_kick_x
     if vx_k != 0.0 | kms:
-      # Get kick properties
-      vy_k = stellar.particles[i].natal_kick_y
-      vz_k = stellar.particles[i].natal_kick_z
-      # Add value to velocities in N-body simulation
-      gravity.particles[i].vx += vx_k
-      gravity.particles[i].vy += vy_k
-      gravity.particles[i].vz += vz_k
-      # Ensure this is a one time thing by setting SN kick flag to false
-      cluster[i].kicked = False
-      # Add index to list of supernovae indices (for later)
-      sn_id.append(i)
-
-  ### STELLAR EVOLUTION CLEANUP
-  # Synchronize masses with gravity code
-  stellar.particles.synchronize_to(gravity.particles)
+      # Check to see if star has been kicked before, if it has, ignore it and move on
+      if cluster[i].kicked == False:
+        # Get other properties
+        vy_k = stellar.particles[i].natal_kick_y
+        vz_k = stellar.particles[i].natal_kick_z
+        # Add value to velocities in N-body simulation
+        gravity.particles[i].vx += vx_k
+        gravity.particles[i].vy += vy_k
+        gravity.particles[i].vz += vz_k
+        # Ensure this is a one time thing by setting SN kick flag to false
+        cluster[i].kicked = True
+        # Add index to list of supernovae indices (for later)
+        sn_id.append(i)
 
   ### DISC ROUTINES
-  # Take subsamples again, reduces checking complexity
-  lm_stars,hm_stars = massSubSet(cluster)
-  # Determine which discs have died
-  # for star in lm_stars:
-  #   if t >= star.disc_lifetime:
-  #     star.disc_alive = False
-  # Now that simulation has evolved, sample the winds
-  for hm_star in hm_stars:
-    al26_frac = hm_star.al26_wind_frac # Al26 wind mass fraction
-    key = hm_star.key
-    mdot = -getParticleFromKey(stellar,key).wind_mass_loss_rate
-    for lm_star in lm_stars:
-      # First, check to see if the disc is still extant
-      if lm_star.disc_alive:
-        # Calculate SLR injection due to winds
-        d = calcStarDistance(hm_star,lm_star)
-        print(d.value_in(pc))
-        if d < 1.0 | pc:
+  for i in hm_id:
+    al26_frac = cluster[i].al26_wind_frac
+    mdot      = - stellar.particles[i].wind_mass_loss_rate
+    for j in lm_id:
+      if t_new <= cluster[j].disc_lifetime:
+        d = calcStarDistance(gravity.particles[i],gravity.particles[j])
+        if d < 0.1 | pc:
+          r_disc = cluster[j].r_disc
           # Calculate injected mass onto disk
-          eta_disc  = calcEtaDisc(lm_star.r_disc,d)  # Fraction of adsorbed mass
+          eta_disc  = calcEtaDisc(r_disc,d)  # Fraction of adsorbed mass
           dm_inj_dt = mdot * eta_disc * al26_frac
           # Euler integrate to find
-          m_27  = lm_star.M_al27
-          m_old = lm_star.M_al26
+          m_27  = cluster[j].M_al27
+          m_old = cluster[j].M_al26
           m_inj = dm_inj_dt * dt
           m_26  = m_old + m_inj
-          print(m_27,m_old)
           mix   = m_26 / m_27
-          print(mix)
+          print(j,mix)
           # Write to cluster
-          lm_star.mdot_al26 = dm_inj_dt
-          lm_star.M_al26    = m_26
-          lm_star.mix_al    = mix
-    else:
-      dm_inj_dt = 0.0 | msolyr
-      lm_star.mdot_al26 = dm_inj_dt
+          cluster[j].mdot_al26 = dm_inj_dt
+          cluster[j].M_al26    = m_26
+          cluster[j].mix_al    = mix
+          print(j,cluster[j].mix_al)
+        else:
+          # If star is not in perimeter, make sure that al26 mass gain rate is zero
+          cluster[j].mdot_al26 = 0.0 | msolyr
+      else:
+        # If disc is decayed, make sure that al26 mass gain rate is zero
+        cluster[j].mdot_al26 = 0.0 | msolyr
+
   # If a supernova has occured, deposit al26 and fe60 from supernova
   # Supernova injection only increases mass and mix frac, does not change mix frac
   # While there is some redundant recalculation here, this is only called a handful of times per sim
   # and the overhead is fairly minimal
-  for i in hm_stars.get_indices_of_keys(sn_keys):
-    hm_star = hm_stars[i]
-    al26_sn = hm_star.al26_sn_yield
-    fe60_sn = hm_star.fe60_sn_yield
-    for lm_star in lm_stars:
-      d = calcStarDistance(hm_star,lm_star)
+
+  for i in sn_id:
+    al26_sn = cluster[i].al26_sn_yield
+    fe60_sn = cluster[i].fe60_sn_yield
+    for j in lm_id:
+      d = calcStarDistance(gravity.particles[i],gravity.particles[j])
       if d < 1.0 | pc:
-        eta_disc = calcEtaDisc(lm_star.r_disc,d)
+        r_disc   = cluster[j].r_disc
+        eta_disc = calcEtaDisc(r_disc,d)
         al26_inj = al26_sn * eta_disc
         fe60_inj = fe60_sn * eta_disc
         # Calculate new values
-        m_al26_old = lm_star.M_al26
-        m_fe60_old = lm_star.M_fe60
+        m_al26_old = cluster[j].M_al26
+        m_fe60_old = cluster[j].M_fe60
         m_al26_new = m_al26_old + al26_inj
         m_fe60_new = m_fe60_old + fe60_inj
         # Get stable isotope disc mass
-        m_al27 = lm_star.M_al27
-        m_fe56 = lm_star.M_fe56
+        m_al27 = cluster[j].M_al27
+        m_fe56 = cluster[j].M_fe56
         # Calculate mixing ratio
         mix_al = m_al26_new / m_al27
         mix_fe = m_fe60_new / m_fe56
         # Write to cluster
-        lm_star.M_al26 = m_al26_new
-        lm_star.M_fe60 = m_fe60_new
-        lm_star.mix_al = mix_al
-        lm_star.mix_fe = mix_fe
-  ### DISC CLEANUP
-  # Synchronise low-mass subset with other simulation sets
-  # High-mass subset does not have to be synchronised
-
-
-  # lm_stars.synchronize_to(cluster)
-  # lm_stars.synchronize_to(gravity.particles)
-  # lm_stars.synchronize_to(stellar.particles)
+        cluster[j].M_al26 = m_al26_new
+        cluster[j].M_fe60 = m_fe60_new
+        cluster[j].mix_al = mix_al
+        cluster[j].mix_fe = mix_fe
 
   ### PLOTTING ROUTINES
   # Plot simulation if needed
-  if plot:
-    plotSimulationState(gravity,int(ceil(n_plot * t_fr)),t_new)
+  # if plot:
+  #   plotSimulationState(gravity,int(ceil(n_plot * t_fr)),t_new)
   
   ### DISK WRITE ROUTINES
   writeLine("al26-wind-rate.csv",t_new,cluster.mdot_al26.value_in(msolyr))
@@ -287,13 +274,26 @@ def writeLine(filename,t,data):
   t_myr = t.value_in(myr)
 
   with open(filename,"a") as f:
-    f.write("\n{:.3e},".format(t_myr))
+    f.write("\n{:+.4E},".format(t_myr))
     
   with open(filename,"ab") as f:
     np.savetxt(f,data,fmt="%+.4E",delimiter=", ",newline=", ")
   return 
 
 def getHighMassStarsIndices(cluster):
+  """
+  Rather than creating subsets of data, which use a lot of memory and have synchronisation issues
+  we instead determine which stars are massive or not, and returns the index, such that all 
+  simulation objects can be addressed at once.
+  While this is run at every step, it is a comparatively lightweight loop, and scales such that
+  O(n)
+
+  Inputs:
+    - cluster: The cluster particule array, which has the high_mass flag for each star
+  Outputs:
+    - hm_id: an array of high mass stars indices
+    - lm_id: an array of low mass star indices
+  """
   hm_id = []
   lm_id = []
   for i,star in enumerate(cluster):
@@ -302,14 +302,6 @@ def getHighMassStarsIndices(cluster):
     else:
       lm_id.append(i)
   return hm_id,lm_id
-  
-
-def getParticleFromKey(system,key):
-  if type(key) != list:
-    key = [key]
-  index = system.particles.get_indices_of_keys(key)
-  particle = system.particles[index[0]-1]
-  return particle
 
 def initFile(filename,header):
   """
@@ -427,6 +419,9 @@ def discLifeTime():
   return tau
 
 def plotSimulationState(simulation,n,t):
+  """
+  Plots
+  """
   x=simulation.particles.x.value_in(pc)
   y=simulation.particles.y.value_in(pc)
   z=simulation.particles.z.value_in(pc)
