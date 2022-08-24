@@ -6,7 +6,6 @@ from amuse.plot import *
 from matplotlib.pyplot import xscale, yscale
 
 def grav_3body(t_end):
-  
   N = 100
   W0 = 3
   Rinit     = 50.  | units.parsec

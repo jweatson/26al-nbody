@@ -14,7 +14,7 @@
 ### LIBRARIES
 # Standard python libraries
 import argparse
-from math import ceil
+from math import ceil, pi
 import sys
 # Amuse imports, complex library so only importing specific things
 from amuse.units import units
@@ -36,7 +36,7 @@ n_plot = 100 # Number of plots to make
 gravity_model = Hermite # Currently using the Hermite model as it runs fine single threaded on M1
 stellar_model = SeBa    # Using SeBa as it is fast and relatively accurate
 
-# Declare units in global namespace, using amuse units
+# Declare units in global namespace, using amuse units, this just saves a lot of time and space
 # Mass units
 kg     = units.kg       # Kilogram, 1.0e+3 g (obviously)
 msol   = units.MSun     # Solar mass, 1.9884099e+33 g
@@ -49,6 +49,9 @@ pc     = units.parsec   # Parsec, 3.0856776e+18 cm
 # Composite units
 msolyr = msol * yr**-1  # Solarmass per year, 6.3010252e+25 g/s
 kms    = units.kms      # Kilometers per second, 1.0e+6 cm/s
+
+# SIMULATION VALUES
+r_bub = 0.1 | pc        # Wind blown bubble size
 
 def evolveSimulation(cluster,gravity,stellar,t_f,bar):
   """
@@ -129,7 +132,7 @@ def evolveSimulation(cluster,gravity,stellar,t_f,bar):
       lm_star = gravity.particles[j]
       d = calcStarDistance(hm_star,lm_star)
       # If star is on a direct intercept course, calculate time to intercept 
-      v_int = np.sqrt((lm_star.vx)**2 + (lm_star.vy)**2 + (lm_star.vz)**2)
+      v_int = calc_star_vel(lm_star.vx,lm_star.vy,lm_star.vz)
       t_int = d / v_int
       # Reduce significantly to find timestep, used for variable step
       dt_p = 0.1 * t_int
@@ -187,31 +190,40 @@ def evolveSimulation(cluster,gravity,stellar,t_f,bar):
   for i in hm_id:
     al26_frac = cluster[i].al26_wind_frac
     mdot      = - stellar.particles[i].wind_mass_loss_rate
+    vxh = gravity.particles[i].vx
+    vyh = gravity.particles[i].vy
+    vzh = gravity.particles[i].vz
     for j in lm_id:
       if t_new <= cluster[j].disc_lifetime:
         d = calcStarDistance(gravity.particles[i],gravity.particles[j])
-        if d < 0.1 | pc:
+        if d < r_bub:
           r_disc = cluster[j].r_disc
+          # Calculate lm star velocity relative to hm star
+          vxl = gravity.particles[j].vx
+          vyl = gravity.particles[j].vy
+          vzl = gravity.particles[j].vz
+          v_star = calc_star_rel_vel(vxl,vyl,vzl,vxh,vyh,vzh)
+          # Calculate dredge efficiency
+          eta_bub = calc_eta_bubble(r_disc,r_bub,v_star,dt)        
           # Calculate injected mass onto disk
-          eta_disc  = calcEtaDisc(r_disc,d)  # Fraction of adsorbed mass
-          dm_inj_dt = mdot * eta_disc * al26_frac
-          # Euler integrate to find
+          dm_inj_dt = mdot * eta_bub * al26_frac
+          # Determine new al26 mass, calculate new al26/al26 ratio
           m_27  = cluster[j].M_al27
           m_old = cluster[j].M_al26
           m_inj = dm_inj_dt * dt
           m_26  = m_old + m_inj
           mix   = m_26 / m_27
-          print(j,mix)
           # Write to cluster
           cluster[j].mdot_al26 = dm_inj_dt
           cluster[j].M_al26    = m_26
           cluster[j].mix_al    = mix
-          print(j,cluster[j].mix_al)
         else:
           # If star is not in perimeter, make sure that al26 mass gain rate is zero
+          # Other parameters should take care of themselves
           cluster[j].mdot_al26 = 0.0 | msolyr
       else:
         # If disc is decayed, make sure that al26 mass gain rate is zero
+        # Other parameters in cluster should take care of themselves
         cluster[j].mdot_al26 = 0.0 | msolyr
 
   # If a supernova has occured, deposit al26 and fe60 from supernova
@@ -252,6 +264,8 @@ def evolveSimulation(cluster,gravity,stellar,t_f,bar):
   #   plotSimulationState(gravity,int(ceil(n_plot * t_fr)),t_new)
   
   ### DISK WRITE ROUTINES
+  # Whilst it is fairly inefficient to open the file and write into it, it is less convoluted
+  # than passing a bunch of files between iterations of this function
   writeLine("al26-wind-rate.csv",t_new,cluster.mdot_al26.value_in(msolyr))
   writeLine("al26-mass.csv",t_new,cluster.M_al26.value_in(msol))
   writeLine("fe60-mass.csv",t_new,cluster.M_fe60.value_in(msol))
@@ -260,11 +274,14 @@ def evolveSimulation(cluster,gravity,stellar,t_f,bar):
 
   ### HOUSEKEEPING ROUTINES
   # Update progress bar using dt value
+  # This is a fairly brute force way of doing it, but the progress bar has always been a bit
+  # Inaccurate when it comes to indeterminate numbers of steps
   prog_old = bar.n
   prog_new = (t_new / t_f)
   prog_del = prog_new - prog_old
   bar.update(prog_del)
-  # Finish simulation and return
+  # Finish simulation and return, if finish = False, then this will be run again inside a loop in
+  # the main function
   return cluster,gravity,stellar,finish,bar
 
 def writeLine(filename,t,data):
@@ -272,10 +289,8 @@ def writeLine(filename,t,data):
   Quick function to append data to the end of a file
   """
   t_myr = t.value_in(myr)
-
   with open(filename,"a") as f:
     f.write("\n{:+.4E},".format(t_myr))
-    
   with open(filename,"ab") as f:
     np.savetxt(f,data,fmt="%+.4E",delimiter=", ",newline=", ")
   return 
@@ -326,7 +341,9 @@ def Al26WindRatio(mass):
   """
   Calculate the ratio of Al26 in the wind of a massive star
   This is calculated by averaging the wind yield with the total mass loss of a star
-  A 5th order polynomail fit is used to estimate the total wind yield
+  A 5th order polynomial fit is used to estimate the total wind yield, this is a more complex
+  polynomial than the supernovae fits, however it fits the curve significantly better.
+  Conversely, 5th order fits diverge too much for the supernovae fits at low masses.
   
   Function is based on data collected in:
     Limongi, M., & Chieffi, A. (2006).
@@ -355,13 +372,15 @@ def Al26WindRatio(mass):
   m_loss_tot = (mass - final_mass).value_in(msol)
   wind_yield = 10**polyobj(m_msol)
   wind_ratio = wind_yield / m_loss_tot
+  print(m_loss_tot,wind_yield,wind_ratio)
   # Finish!
   return wind_ratio
 
 def Al26SNYield(mass):
   """
   Calculate the Al26 supernova yield for a star of a specific mass
-  A 3rd order polynomail fit is used to estimate the total SNe yield
+  A 3rd order polynomail fit is used to estimate the total SNe yield, this seems to provide a fairly
+  accurate value for the supernova yield
   
   Function is based on data collected in:
     Limongi, M., & Chieffi, A. (2006).
@@ -383,7 +402,8 @@ def Al26SNYield(mass):
 def Fe60SNYield(mass):
   """
   Calculate the Fe60 supernova yield for a star of a specific mass
-  A 3rd order polynomail fit is used to estimate the total SNe yield
+  A 3rd order polynomail fit is used to estimate the total SNe yield, this seems to provide a fairly
+  accurate value for the supernova yield
   
   Function is based on data collected in:
     Limongi, M., & Chieffi, A. (2006).
@@ -404,37 +424,98 @@ def Fe60SNYield(mass):
 
 def discLifeTime():
   """
-  Calcualting a disk lifetime
+  Calcualting a disk lifetime, we assume a mean disc lifetime of 5Myr, with an exponential 
+  distribution to calculate the decay time.
+  Calculating the decay time ahead of the simulation - effectively predetermining the fate of the
+  disc - has a number of dire philosophical connotations, but is probably fine for an N-body
+  simulation.
 
-  This is based off of:
+  This is based off of estimated lifetimes from:
     Richert, A. J. W., Getman, K. V., Feigelson, E. D., Kuhn, M. A., Broos, P. S., Povich, M. S.,
     Bate, M. R., & Garmire, G. P. (2018).
     Circumstellar disc lifetimes in numerous galactic young stellar clusters.
     Monthly Notices of the Royal Astronomical Society, 477, 5191–5206.
     https://doi.org/10.1093/mnras/sty949 
   """
-
   lam = 5.0 # Scale height, mean lifetime of 5Myr
   tau = exponential(lam) | myr
   return tau
 
 def plotSimulationState(simulation,n,t):
   """
-  Plots
+  Plots the particule positions in 3D space, nothing much more than that.
   """
-  x=simulation.particles.x.value_in(pc)
+  # Get the x y and z coordinates for each star, convert from AMUSE units to pc
+  x=simulation.particles.x.value_in(pc) 
   y=simulation.particles.y.value_in(pc)
   z=simulation.particles.z.value_in(pc)
+  # Configure the plot
   sns.set(style="darkgrid")
   fig = plt.figure()
   fig.suptitle("T = {:.2} Myr".format(t.value_in(myr)))
+  # Plot
   ax = fig.add_subplot(111, projection = '3d')
   ax.scatter(x, y, z)
   ax.set_xlim([-3,3])
   ax.set_ylim([-3,3])
   ax.set_zlim([-3,3])
+  # Save!
   plt.savefig("plots/"+str(n).zfill(5)+".png")
   plt.close()
+  # Done!
+  return
+
+def calc_eta_bubble(r_disc,r_bub,v_star,dt):
+  """
+  Calculate the cross section of sweeped-up wind from a disc.
+  As a disc traverses through a wind blown bubble, mass from the stellar wind is dredged up, thus
+  deposition rate is a factor of the size of the bubble, the velocity between the stars and the
+  size of the disc.
+  This assumes that the mass loss rate of the wind blowing the bubble tapers off drastically
+  at the edge of the bubble.
+  The al26 yield can be calculated by multiplying the resultant value by the mass of al26 emitted
+  by the star
+  """
+  # Calculate from the timestep the distance travelled through the bubble over the timestep
+  d_trav = v_star * dt
+  # Use this value to calculate the total wind efficiency
+  eta_bub = 0.75 * (r_disc**2) * d_trav / (r_bub**3)
+  return eta_bub
+  
+def calc_star_vel(vx,vy,vz):
+  """
+  Calculate star scalar velocity from individual velocity components
+  Whilst I try and keep most of my code well-documented, there is not much else I can write about
+  this - Joe
+
+  Inputs:
+    vx: Star x-component velocity
+    vy: Star y-component velocity
+    vz: Star z-component velocity
+  Outputs:
+    v_star: Star scalar velocity
+  """
+  # I really shouldn't have to document this
+  v_star = np.sqrt(vx**2 + vy**2 + vz**2)
+  return v_star
+
+def calc_star_rel_vel(vx1,vy1,vz1,vx2,vy2,vz2):
+  """
+  Calculate the relative velocity of two stars in cartesian space
+  Again, I'm not sure what to add here - Joe
+
+  Inputs:
+    vx1,vy1,vz1: Primary star x,y,z velocity components
+    vx2,vy2,vz2: Secondary star x,y,z velocity components
+  Outputs:
+    rel_vel: Relative scalar velocity between stars
+  """
+  # Calculate the relative components
+  vrx,vry,vrz = (vx1-vx2),(vy1-vy2),(vz1-vz2)
+  # Square it, mutiplying is usually faster
+  vrx2,vry2,vrz2 = (vrx*vrx),(vry*vry),(vrz*vrz)
+  rel_vel = np.sqrt(vrx2 + vry2 + vrz2)
+  return rel_vel
 
 def calcEtaDisc(r,d):
   """
@@ -449,7 +530,8 @@ def calcEtaDisc(r,d):
         (pi * r^2) / (4 * pi * d^2) * cos(theta)
       - In the case of these simulations, the disks are at a constant angle of 60 degrees, to reduce
         complexity
-  Furthermore, this assumes a grain size of 0.1 microns, which derives the values of eta_cond and eta_inj
+  Furthermore, this assumes a grain size of 0.1 microns, which derives the values of eta_cond and
+  eta_inj.
   The final proportion, eta_total is calculated by combining these values:
   eta_total = eta_cond * eta_inj * eta_geom
 
@@ -465,7 +547,7 @@ def calcEtaDisc(r,d):
     > These values can be in any units as long as they are:
       - The same unit
       OR
-      - If they are stored as MUSE units, which will allow for conversion
+      - If they are stored as AMUSE units, which will allow for conversion
   Outputs:
     - eta_total: Total efficiency of adsorption
   """
@@ -488,7 +570,7 @@ def calcStarDistance(star1,star2):
 
   x1,y1,z1 = star1.x,star1.y,star1.z
   x2,y2,z2 = star2.x,star2.y,star2.z
-  d  = np.sqrt((x2-x1)**2 + (y2-y1)**2 + (z2-z1)**2)
+  d = np.sqrt((x2-x1)**2 + (y2-y1)**2 + (z2-z1)**2)
   return d
 
 def generateMasses(nstars):
@@ -604,6 +686,18 @@ def initCluster(model, nstars, Rc, nmass=3):
   return cluster,converter
 
 def main(args):
+  """
+  main()
+  
+  This function builds the simulation by calling other functions, in particular:
+  - Initialises star cluster
+  - Initialises N-body and stellar evolution
+  - Starts the progress bar (very important)
+  - Writes header data to output files
+  - Runs the simulation in a continuous loop
+  - Runs the simulation in a continuous loop
+  - Runs th-you get it 
+  """
   nstars = int(args.nstars) # Number of stars
   Rc     = args.Rc | pc  # Plummer sphere half-mass-radius
   t_f    = 10.     | myr # Final simulation time in Myr
