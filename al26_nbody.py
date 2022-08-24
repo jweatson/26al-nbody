@@ -362,7 +362,7 @@ def Al26WindRatio(mass):
   m_msol = mass.value_in(msol) 
   polyobj = np.poly1d(fit)
   # Find the total lifetime of the star, ahead of time
-  evol = SeBa()
+  evol = SeBa(number_of_workers=1)
   evol.particles.add_particle(Particle(mass=mass))
   # Evolve the star until it dies
   evol.evolve_model(1000. | myr)
@@ -372,7 +372,7 @@ def Al26WindRatio(mass):
   m_loss_tot = (mass - final_mass).value_in(msol)
   wind_yield = 10**polyobj(m_msol)
   wind_ratio = wind_yield / m_loss_tot
-  print(m_loss_tot,wind_yield,wind_ratio)
+  evol.stop()
   # Finish!
   return wind_ratio
 
@@ -670,7 +670,6 @@ def initCluster(model, nstars, Rc, nmass=3):
       star.al26_wind_frac = 0.0   # Being a low mass star, wind does not produce Al26
       star.al26_sn_yield  = 0.0 | msol # Similarly, star does not undergo supernova
       star.fe60_sn_yield  = 0.0 | msol # Similarly, star does not undergo supernova
-
   # Initialise other properties, consistent across all stars
   cluster.radius    = 0.   | pc     # Stars themselves are dimensionless
   cluster.r_disc    = 100. | au     # Star wth a disk size of 100 AU
@@ -680,7 +679,6 @@ def initCluster(model, nstars, Rc, nmass=3):
   cluster.M_al26    = 0.0  | kg     # Total mass of Al26 adsorbed
   cluster.M_fe60    = 0.0  | kg     # Total mass of Fe60 adsorbed
   cluster.kicked    = False         # Supernova kick flag
-
   # Finish up and return cluster
   print("Cluster done!")
   return cluster,converter
@@ -719,12 +717,12 @@ def main(args):
   initFile("fe60-ratio.csv","FE60_RATIO")
   # Begin simulation, open ended until finish is true
 
-  print(stellar.particles.wind_mass_loss_rate)
-
   finish = False
   while finish == False:
     cluster,gravity,stellar,finish,bar = evolveSimulation(cluster,gravity,stellar,t_f,bar)
   print("!!! Finished !!!")
+  gravity.stop()
+  stellar.stop()
   return
 
 if __name__ == "__main__":
