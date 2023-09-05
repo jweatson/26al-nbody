@@ -419,6 +419,7 @@ def calc_total_mass_loss(mass,z=0.02):
   evol.evolve_model(simulation_time)
   final_mass = evol.particles[0].mass
   m_loss_tot = (mass - final_mass) # Total mass loss from winds
+
   # Cleanup
   evol.stop()
   del evol
@@ -573,7 +574,7 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
     hm_star = gravity.particles[i]
     for j in lm_id:
       lm_star = gravity.particles[j]
-      d = calcStarDistance(hm_star,lm_star)
+      d = calc_star_distance(hm_star,lm_star)
       # If star were on a direct intercept course, calculate time to intercept 
       v_int = calc_star_vel(lm_star.vx,lm_star.vy,lm_star.vz)
       t_int = d / v_int
@@ -600,6 +601,7 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
   ### STELLAR EVOLUTION ROUTINES
   # First, evolve stars according to SEBA model
   stellar.evolve_model(t_new)
+
   ### STELLAR EVOLUTION - SUPERNOVA
   # Add kick velocity to stars gone supernova
   # This has to use array indexing because it requires participation from multiple datasets
@@ -621,18 +623,32 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
         # Add index to list of supernovae indices (for later)
         sn_id.append(i)
 
+  ### COPYING ROUTINES
+  # Now that 
+  # Notes: This is the preferred method of exchanging data between codes in AMUSE, timesteps are small enough that synchronous operation does not need to be done, SEBA is much faster than Hermite, therefore there would be minimal gain to do both asynchronously 
+  # Channels and pipelines
+  stel_to_grav = stellar.particles.new_channel_to(gravity.particles)
+  grav_to_clus = gravity.particles.new_channel_to(cluster)
+  # Copy over attributes, only mass is copied over to gravity to preserve 0 radius, and doesn't need any other parameters
+  stel_to_grav.copy_attributes(["mass"])
+  # Cluster is used to store checkpoints and results, there is some overlap between these, which is a waste of memory, but it is fairly minimal
+  grav_to_clus.copy()
+  
   ### DISK ROUTINES
-
   ## Calculate SLR deposition for each wind
   # There are probably more reasonable ways to do this, however there is a minimal speed difference and this is elaborated on for clarity
   for i in hm_id: # Iterate through high mass stars
     # Massive star parameters
     mdot = - stellar.particles[i].wind_mass_loss_rate
     for j in lm_id: # Iterate through low mass stars
+      # Quick sanity check for keys
+      if cluster[j].key != stellar.particles[j].key:
+        raise ValueError("Key mismatch!")
+
       # Check to see if disk exists in low mass star system
       if t_new <= cluster[j].tau_disk:
         ### Parameters relevant to both models
-        d = calcStarDistance(gravity.particles[i],gravity.particles[j])
+        d = calc_star_distance(gravity.particles[i],gravity.particles[j])
         r_disk = cluster[j].r_disk
         # Low mass star velocities
         vx = gravity.particles[j].vx
@@ -686,10 +702,10 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
     al26_sn = cluster[i].al26_sn_yield
     fe60_sn = cluster[i].fe60_sn_yield
     for j in lm_id:
-      d = calcStarDistance(gravity.particles[i],gravity.particles[j])
+      d = calc_star_distance(gravity.particles[i],gravity.particles[j])
       if d < r_bub_local_sne:
-        r_disc   = cluster[j].r_disc
-        eta_disk = calc_eta_disk_sne(r_disc,d)
+        r_disk   = cluster[j].r_disk
+        eta_disk = calc_eta_disk_sne(r_disk,d)
         al26_inj = al26_sn * eta_disk
         fe60_inj = fe60_sn * eta_disk
         # Calculate new values
@@ -746,122 +762,18 @@ def get_high_mass_star_indices(cluster):
       lm_id.append(i)
   return hm_id,lm_id
 
-def initFile(filename,header):
+def disk_lifetime():
   """
-  Quick function to initialise file at start of simulation
-  As data appended at the end to save on memory, this has to be run at the start of the
-  """
-  with open(filename,"w") as f:
-    f.write(header)
-  return
-
-def massSubSet(dataset):
-  """
-  Get mass subsets for high mass and low mass stars
-  This is sort of redundant, but it just looks a little cleaner on the evolve stars section
-  There could be a way to determine whether a star is low or high mass
-  """
-  lm_stars = dataset.select(lambda m : m <  12.0 | msol, ["mass"])
-  hm_stars = dataset.select(lambda m : m >= 12.0 | msol, ["mass"])
-  return lm_stars, hm_stars
-
-def Al26WindRatio(mass):
-  """
-  Calculate the ratio of Al26 in the wind of a massive star
-  This is calculated by averaging the wind yield with the total mass loss of a star
-  A 5th order polynomial fit is used to estimate the total wind yield, this is a more complex
-  polynomial than the supernovae fits, however it fits the curve significantly better.
-  Conversely, 5th order fits diverge too much for the supernovae fits at low masses.
-  
-  Function is based on data collected in:
-    Limongi, M., & Chieffi, A. (2006).
-    The Nucleosynthesis of 26Al and 60Fe in Solar Metallicity Stars Extending in Mass from 11
-    to 120 M☉: The Hydrostatic and Explosive Contributions.
-    The Astrophysical Journal, 647(1), 483. https://doi.org/10.1086/505164
-  """
-
-  # Hard coded the 5th order polynomial fit, was found to be the most accurate
-  fit = np.asarray([+1.17105742e-08,
-                    -4.00763571e-06,
-                    +5.28909881e-04,
-                    -3.42510723e-02,
-                    +1.12603185e+00,
-                    -1.97872519e+01])
-  m_msol = mass.value_in(msol) 
-  polyobj = np.poly1d(fit)
-  # Find the total lifetime of the star, ahead of time
-  evol = SeBa(number_of_workers=1)
-  evol.particles.add_particle(Particle(mass=mass))
-  # Evolve the star until it dies
-  evol.evolve_model(1000. | myr)
-  # Get the stars final mass
-  final_mass = evol.particles[0].mass
-  # Now, calculate the 
-  m_loss_tot = (mass - final_mass).value_in(msol)
-  wind_yield = 10**polyobj(m_msol)
-  wind_ratio = wind_yield / m_loss_tot
-  evol.stop()
-  # Finish!
-  return wind_ratio
-
-def Al26SNYield(mass):
-  """
-  Calculate the Al26 supernova yield for a star of a specific mass
-  A 3rd order polynomail fit is used to estimate the total SNe yield, this seems to provide a fairly
-  accurate value for the supernova yield
-  
-  Function is based on data collected in:
-    Limongi, M., & Chieffi, A. (2006).
-    The Nucleosynthesis of 26Al and 60Fe in Solar Metallicity Stars Extending in Mass from 11
-    to 120 M☉: The Hydrostatic and Explosive Contributions.
-    The Astrophysical Journal, 647(1), 483. https://doi.org/10.1086/505164
-  """
-
-  # Hard coded third order polynomial, was found to be the most accurate
-  fit = np.asarray([+1.83477307e-06,
-                    -4.40040850e-04,
-                    +3.81826726e-02,
-                    -4.98382877e+00])
-  m_msol   = mass.value_in(msol) 
-  polyobj  = np.poly1d(fit)
-  sn_yield = 10**polyobj(m_msol)
-  return sn_yield | msol
-
-def Fe60SNYield(mass):
-  """
-  Calculate the Fe60 supernova yield for a star of a specific mass
-  A 3rd order polynomail fit is used to estimate the total SNe yield, this seems to provide a fairly
-  accurate value for the supernova yield
-  
-  Function is based on data collected in:
-    Limongi, M., & Chieffi, A. (2006).
-    The Nucleosynthesis of 26Al and 60Fe in Solar Metallicity Stars Extending in Mass from 11
-    to 120 M☉: The Hydrostatic and Explosive Contributions.
-    The Astrophysical Journal, 647(1), 483. https://doi.org/10.1086/505164
-  """
-
-  # Hard coded third order polynomial, was found to be the most accurate
-  fit = np.asarray([+6.55399558e-06,
-                    -1.59217611e-03,
-                    +1.25085986e-01,
-                    -7.57683552e+00])
-  m_msol   = mass.value_in(msol) 
-  polyobj  = np.poly1d(fit)
-  sn_yield = 10**polyobj(m_msol)
-  return sn_yield | msol
-
-def discLifeTime():
-  """
-  Calcualting a disk lifetime, we assume a mean disc lifetime of 5Myr, with an exponential 
+  Calcualting a disk lifetime, we assume a mean disk lifetime of 5Myr, with an exponential 
   distribution to calculate the decay time.
   Calculating the decay time ahead of the simulation - effectively predetermining the fate of the
-  disc - has a number of dire philosophical connotations, but is probably fine for an N-body
+  disk - has a number of dire philosophical connotations, but is probably fine for an N-body
   simulation.
 
   This is based off of estimated lifetimes from:
     Richert, A. J. W., Getman, K. V., Feigelson, E. D., Kuhn, M. A., Broos, P. S., Povich, M. S.,
     Bate, M. R., & Garmire, G. P. (2018).
-    Circumstellar disc lifetimes in numerous galactic young stellar clusters.
+    Circumstellar disk lifetimes in numerous galactic young stellar clusters.
     Monthly Notices of the Royal Astronomical Society, 477, 5191–5206.
     https://doi.org/10.1093/mnras/sty949 
   """
@@ -875,9 +787,9 @@ def calc_v(vx,vy,vz):
 def calc_eta_bubble_wind(r_disk,r_bub,d_bub_trav):
   """
   Calculate the cross section of sweeped-up wind from a disk.
-  As a disc traverses through a wind blown bubble, mass from the stellar wind is dredged up, thus
+  As a disk traverses through a wind blown bubble, mass from the stellar wind is dredged up, thus
   deposition rate is a factor of the size of the bubble, the velocity between the stars and the
-  size of the disc.
+  size of the disk.
   This assumes that the mass loss rate of the wind blowing the bubble tapers off drastically
   at the edge of the bubble.
   The al26 yield can be calculated by multiplying the resultant value by the mass of al26 emitted
@@ -967,18 +879,17 @@ def calc_eta_disk_sne(r,d):
   eta_total = eta_cond * eta_inj * eta_geom
   return eta_total
 
-def calcStarDistance(star1,star2):
+def calc_star_distance(star1,star2):
   """
   Calculates distance between star 1 and star 2, uses amuse values so unit is flexible.
   You should know this calculation.
   """
-
   x1,y1,z1 = star1.x,star1.y,star1.z
   x2,y2,z2 = star2.x,star2.y,star2.z
   d = np.sqrt((x2-x1)**2 + (y2-y1)**2 + (z2-z1)**2)
   return d
 
-def generateMasses(nstars):
+def generate_masses(nstars):
   """
   Generate a series of masses for stars using the Maschberger IMF, ensures that at least 1 massive star is included
   """
@@ -1020,7 +931,7 @@ def generateMasses(nstars):
   # Check to see if a high mass star is present
   if max(masses) < 13.0:
     print("No massive stars in cluster! Re-rolling!")
-    masses = generateMasses(nstars)
+    masses = generate_masses(nstars)
   # Convert list into array
   masses = np.asarray(masses)
   return masses
@@ -1039,7 +950,7 @@ def init_cluster(model, nstars, Rc, SLRs, nmass=3):
 
   print("Sampling masses...")
   # First, generate a series of masses
-  masses = generateMasses(nstars)
+  masses = generate_masses(nstars)
   # Set basic simulation parameters
   Mcluster  = sum(masses) | msol
   print("Done! Generating cluster...")
@@ -1077,7 +988,7 @@ def init_cluster(model, nstars, Rc, SLRs, nmass=3):
     star.m_disk_gas  = 0.1 * star.mass
     star.m_disk_dust = 0.01 * star.m_disk_gas
     star.r_disk      = 100.0 | au # Stars have a common initial disk size
-    star.tau_disk    = discLifeTime() # Calculate disk lifetime from random sample distribution
+    star.tau_disk    = disk_lifetime() # Calculate disk lifetime from random sample distribution
     # SLR properties
     ## Aluminium group
     star.mass_27al = 8.500e-6 * star.mass # Calculate stable Al mass from Chrondritic samples
@@ -1163,7 +1074,7 @@ def main(args):
     else:
       checkpoint_number = args.n_checkpoint
     cluster,converter,yields,metadata = load_checkpoint(args.reload,checkpoint_number)
-    metadata.update(args.reload,increment_checkpoint = False) # Update the metadata but don't increment number
+    metadata.update_access_time() # Inform metadata has been accessed
     used_checkpoint = True
 
   # Initialise N-Body simulation

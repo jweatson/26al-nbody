@@ -57,3 +57,97 @@ General progression of what needs to be done.
 - [X] Supernovae?
   - [X] Included
 
+# 19th June 2023
+
+- I'm back and working on this after working on the stuff from my previous paper.
+- Moved entire build to Nemesis workstation, as it's now not being used to render planets
+
+## Things that need doing
+- [ ] Update deposition model to use Limongi + Cheffi 2018 rather than earlier paper
+  - [ ] Class based system for stars, specifically using a dictionary for storing yields so it can be iterated
+- [ ] Change file outputs
+  - [ ] Using HDF5 files for data writing, updating tables every step
+
+# Currrent work
+- Right, painstaking file reading stuff done
+- Need to integrate limongi calculation stuff properly
+  - Just do it as-is, the processing for this is slow but its only for a handful of stars in the system, use if the mass-loss flag = 1
+  - Calculate total mass loss first, then yields for each, and then ratios in the form of a class
+  - Saves repeated calculation of mass loss through ageing, while also having all of the relevant statistics
+- As for mismatching of isotopes and such, it might be a good idea to just print out the isotopes being managed
+
+- I need to work on the slr depositing and emitting routines
+- SLR routine should run on initialisation, be carried into the creation of the star class?
+  - While this affects portability it is probably the best way to do it, as it does require it anyway, and prevents a tonne of code re-use
+    - Best to do it that way then
+
+- Ideally by the end of the day tomorrow (Wednesday) this should be finished, and then I can work what code needs editing work
+  - Also need to test that writing these classes can fit into the particles system, because if it doesn't I am kind of fucked lmao
+  - Cluster works but has to be iterated in a for loop, make sure that the thing is efficient then
+
+- Need to confirm that this version is the most recent, edits were made on the laptop version of this to work with fractal clusters, but that seems to be the bulk of the changes
+- Iirc the rest of it was in place and working, pending significant testing
+
+# 18/7/23
+- Code for SLR emission seems to work well now, need to work on:
+  - Deposition
+  - File saving
+  - Decay calculations
+  - Tying new class based system into code
+  - Rewriting everything
+- It's a shame things have been going rather slowly, but I think the tedious things might be out of the way
+
+# 10/8/23
+- Goddamn it, some issues cropped up
+- I have to rip out the class system unfortunately, absolute pain
+- However, the file saving issue is sovled, I can just use a 
+
+## Tasks
+- [X] Implement and verify that all of the properties work on initialisation
+  - It should now be the case that adding additional elements should be fine, use 26al and 60fe for now?
+  - There were a couple of sections that needed serious work anyway
+- [ ] Get abundances for other elements (annoying, ask Richard, for a lead tomorrow)
+- [ ] Check file saving
+- [ ] Add reload from checkpoint system (bypass cluster system)
+- [ ] Metadata dump
+- [ ] Yield dump for each star, periodic
+  - [ ] Ideally this is paged for each SLR, stored as a dictionary containing a dataset inside the class that becomes the pickle file
+  - [ ] Slightly complex, real old lady swallowing a fly shit, but it should work and be easy to access
+- [ ] Periodic checkpoints system
+- [ ] Add supernovae yield calculator using more recent data
+
+# 15/8/23
+- Right, file saving works but is nowhere near fast or efficient enough
+  - Best way of implementing:
+    - Main thing is writing yield data, that should ideally be appended to disk
+    - State of simulation should still be checkpointed through pickle
+    - Individual star contributions could still be pickled at every checkpoint too, much less data dense
+      - Stored in its own pickle for size
+    - Store summation of all yields in text document
+
+- It seems like the main thing is pickle dumping the data, it's not fast enough
+- Using a combination of ubjson and pickle is best, pickle for complex datatypes, ubjson for yields data
+  - This is extremely fast and effective
+- [ ] Need to add a section to count up the number of checkpoints and store in the metadata file
+
+# 18/8/23
+
+Right, not much work done today, whoops.
+Overall there isn't much to do on the lower levels now.
+- [X] Write routine to find most recent file, or find it from arguments
+- [X] Need to also recover base name to continue simulation, as well as most recent iteration
+  - Kind of done
+  - [X] Iterator based on most recent value (stored in metadata)
+- [X] Rewrite arguments section to ignore mandatory inputs when loading from disk
+
+Right, the general stuff is cleaned up, I'm happy with that, just using a series of conditional arguments in the arguments parser, seems liek the best way to do it 
+
+Then its:
+
+- [ ] Check and refactor execution loop
+- [ ] Improve functions 
+- [ ] Clear up old, unusued functions
+- [ ] Clear up, make license and gitignore
+  - [ ] Push contents
+- [ ] Perform checks, devise some unit tests
+- [ ] Need to show some graphical tests wrt constant injection etc. for the paper
