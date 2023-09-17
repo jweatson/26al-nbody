@@ -20,14 +20,17 @@ from amuse.units import units # Unit conversion
 from amuse.ic import plummer # Cluster model
 from amuse.community.fractalcluster.interface import new_fractal_cluster_model
 from amuse.lab import nbody_system, Hermite, SeBa, Particle # Simulation libraries
+from amuse.community.bhtree import Bhtree
+from amuse.community.ph4 import Ph4
 # Plotting libraries
 import matplotlib.pyplot as plt
 import seaborn as sns
 # Math/Array libraries
-import numpy as np
+import numpy as np # Numpy library, what code isn't complete without it?
+import numba as nb # Numba JIT library, used for accelerating less performant parts of the code
 from numpy.random import uniform, exponential # Random distributions for IMF 
 from math import exp, ceil, pi # Always useful
-from scipy.interpolate import splev,splrep # Interpolation libraries for wind yield calculations
+from scipy.interpolate import splev,splrep,Akima1DInterpolator # Interpolation libraries for wind yield calculations
 # File saving
 import re
 import os.path
@@ -39,12 +42,18 @@ import zstandard as zstd # ZSTD (https://facebook.github.io/zstd/) is used for c
 from tqdm import tqdm # Good little progress bar
 from time import time
 from datetime import datetime
+# Warnings for numba
+from numba.core.errors import NumbaDeprecationWarning, NumbaPendingDeprecationWarning
+import warnings
+warnings.simplefilter('ignore', category=NumbaDeprecationWarning)
+warnings.simplefilter('ignore', category=NumbaPendingDeprecationWarning)
 
 # GLOBAL VALUES
-n_plot = 100 # Number of checkpoints to make
+n_plot = 2500 # Number of checkpoints to make
 module_directory = os.path.dirname(os.path.abspath(sys.argv[0]))
+workers = 8
 ### MODELS
-gravity_model = Hermite # Currently using the Hermite model as it runs fine single threaded on M1
+gravity_model = "bhtree" # Currently using the Hermite model as it runs fine single threaded on M1
 stellar_model = SeBa    # Using SeBa as it is fast and relatively accurate
 
 # Declare units in global namespace, using amuse units, this just saves a lot of time and space
@@ -120,12 +129,16 @@ class Yields():
     self.time            = []
     self.local_26al      = []
     self.global_26al     = []
+    self.sne_26al        = []
     self.sum_local_26al  = []
     self.sum_global_26al = []
+    self.sum_sne_26al    = []
     self.local_60fe      = []
     self.global_60fe     = []
+    self.sne_60fe        = []
     self.sum_local_60fe  = []
     self.sum_global_60fe = []
+    self.sum_sne_60fe    = []
     self.first_write     = True
     return 
   def update_state(self,model_time,cluster):
@@ -141,12 +154,19 @@ class Yields():
     self.time.append(model_time.value_in(myr))
     self.local_26al.append(list(cluster.mass_26al_local.value_in(msol)))
     self.global_26al.append(list(cluster.mass_26al_global.value_in(msol)))
+    self.sne_26al.append(list(cluster.mass_26al_sne.value_in(msol)))
+    # 26Al sums
     self.sum_local_26al.append(sum(list(cluster.mass_26al_local.value_in(msol))))
     self.sum_global_26al.append(sum(list(cluster.mass_26al_global.value_in(msol))))
+    self.sum_sne_26al.append(sum(list(cluster.mass_26al_sne.value_in(msol))))
+    # 60Fe Continuous values
     self.local_60fe.append(list(cluster.mass_60fe_local.value_in(msol)))
     self.global_60fe.append(list(cluster.mass_60fe_global.value_in(msol)))
+    self.sne_60fe.append(list(cluster.mass_60fe_sne.value_in(msol)))
+    # 60Fe sums
     self.sum_local_60fe.append(sum(list(cluster.mass_60fe_local.value_in(msol))))
     self.sum_global_60fe.append(sum(list(cluster.mass_60fe_global.value_in(msol))))
+    self.sum_sne_60fe.append(sum(list(cluster.mass_60fe_sne.value_in(msol))))
     # Write CSV header first, this is written in such a way that restoring the yields object should not cause this to rewrite
     if self.first_write == True:
       self.write_csv_header()
@@ -160,7 +180,7 @@ class Yields():
     Calling this function erases the contents of the cluster-yields file, so DO NOT use it more than once
     """
     with open("{}-cluster-yields.csv".format(self.filename),"w") as f:
-      f.write("time,local_26al,global_26al,local_60fe,global_60fe\n")
+      f.write("time,local_26al,global_26al,sne_26al,local_60fe,global_60fe,sne_60fe\n")
   def write_to_csv(self):
     """
     Append to global yields file, this is done every step
@@ -170,8 +190,10 @@ class Yields():
         self.time[-1],
         self.sum_local_26al[-1],
         self.sum_global_26al[-1],
+        self.sum_sne_26al[-1],
         self.sum_local_60fe[-1],
-        self.sum_global_60fe[-1]
+        self.sum_global_60fe[-1],
+        self.sum_sne_60fe[-1]
       )) 
   def marinate(self,filename):
     """
@@ -299,10 +321,9 @@ def save_checkpoint(filename,nfile,cluster,converter,yields,metadata,bar=None):
   state_filename = filename+"-state-"+str(nfile).zfill(5)+".pkl.zst"
   yields_filename = filename+"-yields.ubj.zst"
 
-  if bar is None:
-    print("! Saving checkpoint file \"{}\"...".format(state_filename),end=" ")
-  # else:
-  #   bar.set_description("Saving checkpoint #{}...".format(str(nfile).zfill(5)),refresh=True)
+  if metadata.args.verbose:
+    if bar is None:
+      print("! Saving checkpoint file \"{}\"...".format(state_filename),end=" ")
 
   t1 = time()
   # Pack all relevant structures into the state object
@@ -314,26 +335,25 @@ def save_checkpoint(filename,nfile,cluster,converter,yields,metadata,bar=None):
   # Done!
   t2 = time()
 
-  if bar is None:
-    print("Done! Took {:3f} seconds!".format(t2-t1))
-  # else:
-  #   bar.set_description("Saving checkpoint file \"{}\"... Done! Took {:3f} seconds!".format(state_filename,t2-t1),refresh=True)
+  if metadata.args.verbose:
+    if bar is None:
+      print("Done! Took {:3f} seconds!".format(t2-t1))
 
   # Write yields object to disk
-  if bar is None:
-    print("! Saving yields file \"{}\"...".format(yields_filename),end=" ")
-  # else:
-  #   bar.set_description("Saving yields file \"{}\"...".format(yields_filename),refresh=True)
-    
+  if metadata.args.verbose:
+    if bar is None:
+      print("! Saving yields file \"{}\"...".format(yields_filename),end=" ")
+
   t3 = time()
   yields.marinate(yields_filename)
   # Done!
   t4 = time()
 
-  if bar is None:
-    print("Done! Took {:3f} seconds!".format(t4-t3))
-  else:
-    bar.set_description("Saving checkpoint #{}... Done! Took {:3f} seconds!".format(str(nfile).zfill(5),t4-t1),refresh=True)
+  if metadata.args.verbose:
+    if bar is None:
+      print("Done! Took {:3f} seconds!".format(t4-t3))
+    else:
+      bar.write("Saving checkpoint #{}... Done! Took {:3f} seconds!".format(str(nfile).zfill(5),t4-t1),refresh=True)
   return
 
 def load_checkpoint(filename,nfile):
@@ -393,8 +413,8 @@ def calc_slr_yield(mass,masses,yields):
   if mass_msol < min(masses_msol) or mass_msol > max(masses_msol):
     slr_yield = 0.0 | msol
   else:
-    spline    = splrep(masses_msol,yields_msol)       # Build scipy spline object
-    slr_yield = float(splev(mass_msol,spline)) | msol # Fit spline
+    interp = Akima1DInterpolator(masses_msol,np.log10(yields_msol))
+    slr_yield = float(10**interp(mass_msol)) | msol
   return slr_yield  
 
 def calc_total_mass_loss(mass,z=0.02):
@@ -502,6 +522,68 @@ def read_SLRs(filename):
   # Finish up!
   return SLRs
 
+@nb.njit(parallel=True)
+def calc_wind_abs(lm_id_arr,hm_id_arr,
+                  x_arr,y_arr,z_arr,
+                  vx_arr,vy_arr,vz_arr,
+                  mdot_arr,
+                  wind_ratio_arr,
+                  rdisk_arr,
+                  distance_limit,
+                  bubble_radius,
+                  dt,):
+  """
+  Description:
+    This code is written in a particular way   
+  
+    Note: previously this was written in pure python, it was a lot nicer to look at, and significantly less jank. Unfortunately python is so painfully slow at this kind of looping thing, and was slower than the _N-body solver_. So it now runs in njit.
+
+  Inputs:
+    arr[int]   lm_id_arr: Array of index locations in all star array for low mass stars
+    arr[int]   hm_id_arr: Array of index locations in all star arrays for high mass stars
+    arr[float] x/y/z_arr: Array of all stars current positions from centre (km)
+    arr[float] vx/vy/vz_arr: Array of all stars current velocity components (km/s)
+    arr[float] mdot_arr: Array of all stars current mass loss rates (kg/s)
+    arr[float] wind_ratio_arr: Array of all stars wind ratio for specific SLR
+    arr[float] rdisk_arr: Array of all stars disk radii (typically 100 AU, but I wrote it in a way where it can adjust per star in future) (km)
+    float      distance_limit: 
+    float      bubble_radius: 
+    float      dt: Current timestep (s)
+  Outputs:
+    arr[float] wind_abs_arr: Array of absorbed wind mass for the particular SLR for every star (kg)
+  Once again, if anyone is using this, I am sorry, I really tried not to use numba
+  """
+  nstars = len(x_arr)
+  wind_abs_arr = np.zeros(nstars)
+  # Prange doesn't support enumerate, so indexing is manual
+  for i in nb.prange(len(lm_id_arr)):
+    lm = lm_id_arr[i]
+    for j in range(len(hm_id_arr)):
+      hm = hm_id_arr[j]
+      # Get variables, otherwise contend with a bunch of array math, do it once here
+      mdot       = mdot_arr[hm]
+      wind_ratio = wind_ratio_arr[hm]
+      r_disk     = rdisk_arr[lm]
+      # Get star positions
+      lm_x , lm_y, lm_z = x_arr[lm], y_arr[lm], z_arr[lm]
+      hm_x , hm_y, hm_z = x_arr[hm], y_arr[hm], z_arr[hm]
+      # Check to see if using local model and if star is in bubble, if this is the case skip loop iteration
+      if distance_limit != 0.0:
+        d_sep = ((lm_x - hm_x)**2 + (lm_y - hm_y)**2 + (lm_z - hm_z)**2)**0.5
+        if bubble_radius <= d_sep:
+          continue
+      # Get low mass star velocities
+      lm_vx, lm_vy, lm_vz = vx_arr[lm], vy_arr[lm], vz_arr[lm]
+      # Calculate disk speed
+      disk_spd = (lm_vx**2 + lm_vy**2 + lm_vz**2)**0.5
+      d_disk_trav = disk_spd * dt
+      # Calculate cross section and wind absorption for global model
+      eta_bub  = 0.75 * (r_disk**2) * d_disk_trav / (bubble_radius ** 3)
+      wind_abs = wind_ratio * mdot * eta_bub * dt
+      # Add result to array
+      wind_abs_arr[lm] += wind_abs
+  return wind_abs_arr
+
 def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,bar):
   """
   Evolve simulation with an adaptive timestep
@@ -512,7 +594,7 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
     - Proximity and sudden intercept velocity with massive stars, timestep is determined by
       the determining the first low-mass star to collide with a massive star assuming it was
       travelling on a collision course at its current velocity, this is then divided by 10
-      for good measure. This is a fairly fast calculation but can change timestep effectively
+      for good mewasure. This is a fairly fast calculation but can change timestep effectively
       for close encounters
     - If timestep exceeds expected next plot interval, use that instead
   
@@ -562,29 +644,47 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
   ### INITIALISATION
   # Get current time
   t = gravity.model_time
+  t_start_func = time()
+  t_start_init = time()
   # Generate a list of indices for high mass and low mass stars
   hm_id,lm_id = get_high_mass_star_indices(cluster)
-
-  ### TIME-STEP ROUTINES
-  # Get maximal timestep, only used in very sparse environments
+  # If all stars have gone supernovae, or gone below high mass threshold, immediately end simulation
+  if len(hm_id) == 0:
+    bar.write("!!! NO HIGH MASS STARS REMAINING, FINISHING SIMULATION !!!")
+    finish = True
+    return cluster,gravity,stellar,yields,metadata,finish,bar
+  # Quick sanity check that keys are same this should not happen based on my understanding of AMUSE but it's to be safe
+  for i,star in enumerate(cluster):
+    if star.key != stellar.particles[i].key or star.key != gravity.particles[i].key:
+      raise ValueError("Key mismatch between stellar, cluster and gravity particles, simulation cannot continue!")
+  t_fin_init = time()
+  # Calculate timestep, previously we used a variable timestep, but it was extremely slow for some reason
   dt = t_f / n_plot
-  dt_fine = dt / 100 # Fine timestep, for minimising
-  # Calculate safe timestep, based on proximity of stars and their current velocities
-  for i in hm_id:
-    hm_star = gravity.particles[i]
-    for j in lm_id:
-      lm_star = gravity.particles[j]
-      d = calc_star_distance(hm_star,lm_star)
-      # If star were on a direct intercept course, calculate time to intercept 
-      v_int = calc_star_vel(lm_star.vx,lm_star.vy,lm_star.vz)
-      t_int = d / v_int
-      # Reduce significantly to find timestep, used for variable step
-      dt_p = 0.2 * t_int
-      dt   = min(dt_p,dt)
-      # Now compare compare to a much smaller timestep to prevent overrefinement and extremely small steps
-      dt = max(dt,dt_fine)
-  # From minimised dt, find new timestep
   t_new = t + dt
+
+  if metadata.args.verbose:
+    bar.write("t = {:.3f} Myr: Finished init, took {:.3f} sec".format(t_new.value_in(myr),t_fin_init - t_start_init))
+
+  # ### TIME-STEP ROUTINES
+  # # Get maximal timestep, only used in very sparse environments
+  # dt = t_f / n_plot
+  # dt_fine = dt / 100 # Fine timestep, for minimising
+  # # Calculate safe timestep, based on proximity of stars and their current velocities
+  # for i in hm_id:
+  #   hm_star = gravity.particles[i]
+  #   for j in lm_id:
+  #     lm_star = gravity.particles[j]
+  #     d = calc_star_distance(hm_star,lm_star)
+  #     # If star were on a direct intercept course, calculate time to intercept 
+  #     v_int = calc_star_vel(lm_star.vx,lm_star.vy,lm_star.vz)
+  #     t_int = d / v_int
+  #     # Reduce significantly to find timestep, used for variable step
+  #     dt_p = 0.2 * t_int
+  #     dt   = min(dt_p,dt)
+  #     # Now compare compare to a much smaller timestep to prevent overrefinement and extremely small steps
+  #     dt = max(dt,dt_fine)
+  # # From minimised dt, find new timestep
+  # t_new = t + dt
 
   # Check timestep is valid against finishing simulation or plotting
   finish = False
@@ -596,32 +696,42 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
 
   ### N-BODY ROUTINES
   # Now, evolve the N-body simulation (most time consuming section of iteration)
+
+
+  t_start_grav = time()
   gravity.evolve_model(t_new)
+  t_fin_grav = time()
+  if metadata.args.verbose:
+    bar.write("t = {:.3f} Myr: Finished N-body, took {:.3f} sec".format(t_new.value_in(myr),t_fin_grav - t_start_grav))
 
   ### STELLAR EVOLUTION ROUTINES
   # First, evolve stars according to SEBA model
+  t_start_stel = time()
   stellar.evolve_model(t_new)
+  t_fin_stel = time()
+  if metadata.args.verbose:
+    bar.write("t = {:.3f} Myr: Finished SeBa, took {:.3f} sec".format(t_new.value_in(myr),t_fin_stel - t_start_stel))
 
   ### STELLAR EVOLUTION - SUPERNOVA
   # Add kick velocity to stars gone supernova
   # This has to use array indexing because it requires participation from multiple datasets
-  sn_id = []
-  for i in hm_id:
-    vx_k = stellar.particles[i].natal_kick_x
-    if vx_k != 0.0 | kms:
-      # Check to see if star has been kicked before, if it has, ignore it and move on
-      if cluster[i].kicked == False:
-        # Get other properties
-        vy_k = stellar.particles[i].natal_kick_y
-        vz_k = stellar.particles[i].natal_kick_z
-        # Add value to velocities in N-body simulation
-        gravity.particles[i].vx += vx_k
-        gravity.particles[i].vy += vy_k
-        gravity.particles[i].vz += vz_k
-        # Ensure this is a one time thing by setting SN kick flag to false
-        cluster[i].kicked = True
-        # Add index to list of supernovae indices (for later)
-        sn_id.append(i)
+  # sn_id = []
+  # for i in hm_id:
+  #   vx_k = stellar.particles[i].natal_kick_x
+  #   if vx_k != 0.0 | kms:
+  #     # Check to see if star has been kicked before, if it has, ignore it and move on
+  #     if cluster[i].kicked == False:
+  #       # Get other properties
+  #       vy_k = stellar.particles[i].natal_kick_y
+  #       vz_k = stellar.particles[i].natal_kick_z
+  #       # Add value to velocities in N-body simulation
+  #       gravity.particles[i].vx += vx_k
+  #       gravity.particles[i].vy += vy_k
+  #       gravity.particles[i].vz += vz_k
+  #       # Ensure this is a one time thing by setting SN kick flag to false
+  #       cluster[i].kicked = True
+  #       # Add index to list of supernovae indices (for later)
+  #       sn_id.append(i)
 
   ### COPYING ROUTINES
   # Now that 
@@ -636,93 +746,99 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
   
   ### DISK ROUTINES
   ## Calculate SLR deposition for each wind
-  # There are probably more reasonable ways to do this, however there is a minimal speed difference and this is elaborated on for clarity
-  for i in hm_id: # Iterate through high mass stars
-    # Massive star parameters
+  # There are probably more reasonable ways to do this, however this is the fastest implementation I could think of
+  # Previous version used an entirely python prescription, though this was extremely slower, by around 5 OOM
+  # This is passed onto a JIT compiled, nopython function, original python implementation took ~98% of total load
+  t_start_winds = time()
+  # First, split arrays such that they can be read into a NUMBA compliant function (pandas splitting is efficient, accelerated)
+  x_arr     = gravity.particles.x.value_in(units.km)
+  y_arr     = gravity.particles.y.value_in(units.km)
+  z_arr     = gravity.particles.z.value_in(units.km)
+  vx_arr    = gravity.particles.vx.value_in(units.km/units.s)
+  vy_arr    = gravity.particles.vy.value_in(units.km/units.s)
+  vz_arr    = gravity.particles.vz.value_in(units.km/units.s)
+  mdot_arr  = - stellar.particles.wind_mass_loss_rate.value_in(units.kg/units.s)
+  rdisk_arr = cluster.r_disk.value_in(units.km)
+  wind_ratio_26al_arr = cluster.wind_ratio_26al
+  wind_ratio_60fe_arr = cluster.wind_ratio_60fe
+  # Calculate wind absorption from Global model 
+  wind_abs_global_26al = calc_wind_abs(lm_id,hm_id,
+                                       x_arr,y_arr,z_arr,
+                                       vx_arr,vy_arr,vz_arr,
+                                       mdot_arr,
+                                       wind_ratio_26al_arr,
+                                       rdisk_arr,
+                                       distance_limit = 0.0,
+                                       bubble_radius = 2 * Rc.value_in(units.km),
+                                       dt = dt.value_in(units.s)) | kg
+  wind_abs_global_60fe = calc_wind_abs(lm_id,hm_id,
+                                       x_arr,y_arr,z_arr,
+                                       vx_arr,vy_arr,vz_arr,
+                                       mdot_arr,
+                                       wind_ratio_60fe_arr,
+                                       rdisk_arr,
+                                       distance_limit = 0.0,
+                                       bubble_radius = 2 * Rc.value_in(units.km),
+                                       dt = dt.value_in(units.s)) | kg
+  # Now calculate wind absorption from Local model
+  wind_abs_local_26al = calc_wind_abs(lm_id,hm_id,
+                                      x_arr,y_arr,z_arr,
+                                      vx_arr,vy_arr,vz_arr,
+                                      mdot_arr,
+                                      wind_ratio_26al_arr,
+                                      rdisk_arr,
+                                      distance_limit = r_bub_local_wind.value_in(units.km),
+                                      bubble_radius = r_bub_local_wind.value_in(units.km),
+                                      dt = dt.value_in(units.s)) | kg
+  wind_abs_local_60fe = calc_wind_abs(lm_id,hm_id,
+                                      x_arr,y_arr,z_arr,
+                                      vx_arr,vy_arr,vz_arr,
+                                      mdot_arr,
+                                      wind_ratio_60fe_arr,
+                                      rdisk_arr,
+                                      distance_limit = r_bub_local_wind.value_in(units.km),
+                                      bubble_radius = r_bub_local_wind.value_in(units.km),
+                                      dt = dt.value_in(units.s)) | kg
+  # Finish up! Copy values back into original wind arrays, also fast, because this is accelerated
+  cluster.mass_26al_global += wind_abs_global_26al 
+  cluster.mass_60fe_global += wind_abs_global_60fe
+  cluster.mass_26al_local  += wind_abs_local_26al
+  cluster.mass_60fe_local  += wind_abs_local_60fe
+  t_fin_winds = time() 
+  if metadata.args.verbose:
+    bar.write("t = {:.3f} Myr: Finished winds, took {:.3f} sec".format(t_new.value_in(myr),t_fin_winds - t_start_winds))
+
+  ### SUPERNOVA ROUTINES
+  # This one doesn't have to be written for numba, since it will only happen every time a supernova occurs, so a handful of times per simulation
+  for i in hm_id:
     mdot = - stellar.particles[i].wind_mass_loss_rate
-    for j in lm_id: # Iterate through low mass stars
-      # Quick sanity check for keys
-      if cluster[j].key != stellar.particles[j].key:
-        raise ValueError("Key mismatch!")
-
-      # Check to see if disk exists in low mass star system
-      if t_new <= cluster[j].tau_disk:
-        ### Parameters relevant to both models
-        d = calc_star_distance(gravity.particles[i],gravity.particles[j])
-        r_disk = cluster[j].r_disk
-        # Low mass star velocities
-        vx = gravity.particles[j].vx
-        vy = gravity.particles[j].vy
-        vz = gravity.particles[j].vz
-        # Calculate the traversed distance of the low mass system, common between global and local
-        disk_spd    = (vx**2 + vy**2 + vz**2)**0.5
-        d_disk_trav = disk_spd * dt
-        # Calculate cross section and wind absorption for global model
-        eta_bub_global  = calc_eta_bubble_wind(r_disk,2*Rc,d_disk_trav)
-        wind_abs_global = mdot * eta_bub_global * dt
-        ## Calculate rates for each SLR for winds
-        wind_26al_global = wind_abs_global * cluster[i].wind_ratio_26al
-        wind_60fe_global = wind_abs_global * cluster[i].wind_ratio_60fe
-        # Calculate new disk SLR mass for global model
-        # For 26Al
-        mass_26al_old_global = cluster[j].mass_26al_global
-        mass_26al_new_global = mass_26al_old_global + wind_26al_global
-        # For 60Fe
-        mass_60fe_old_global = cluster[j].mass_60fe_global
-        mass_60fe_new_global = mass_60fe_old_global + wind_60fe_global
-        # For global model, rewrite values
-        cluster[j].mass_26al_global = mass_26al_new_global
-        cluster[j].mass_60fe_global = mass_60fe_new_global
-
-        # Now calculate disk interaction for local model
-        if d <= r_bub_local_wind:
-          # Calculate cross section and wind absorption for local model
-          eta_bub_local = calc_eta_bubble_wind(r_disk,r_bub_local_wind,d_disk_trav)
-          wind_abs_local = mdot * eta_bub_local * dt
-          # Calculate wind deposition rates
-          wind_26al_local = wind_abs_local * cluster[i].wind_ratio_26al
-          wind_60fe_local = wind_abs_local * cluster[i].wind_ratio_60fe
-          # Calculate new disk SLR mass
-          # For 26Al
-          mass_26al_old_local = cluster[j].mass_26al_local
-          mass_26al_new_local = mass_26al_old_local + wind_26al_local
-          # For 60Fe
-          mass_60fe_old_local = cluster[j].mass_60fe_local
-          mass_60fe_new_local = mass_60fe_old_local + wind_60fe_local
-          # Rewrite values for local model
-          cluster[j].mass_26al_local = mass_26al_new_local
-          cluster[j].mass_60fe_local = mass_60fe_new_local
-
-  # If a supernova has occured, deposit al26 and fe60 from supernova
-  # Supernova injection only increases mass and mix frac, does not change mix frac
-  # While there is some redundant recalculation here, this is only called a handful of times per sim
-  # and the overhead is fairly minimal
-
-  for i in sn_id:
-    al26_sn = cluster[i].al26_sn_yield
-    fe60_sn = cluster[i].fe60_sn_yield
-    for j in lm_id:
-      d = calc_star_distance(gravity.particles[i],gravity.particles[j])
-      if d < r_bub_local_sne:
-        r_disk   = cluster[j].r_disk
-        eta_disk = calc_eta_disk_sne(r_disk,d)
-        al26_inj = al26_sn * eta_disk
-        fe60_inj = fe60_sn * eta_disk
-        # Calculate new values
-        m_al26_old = cluster[j].mass_26al_sne
-        m_fe60_old = cluster[j].mass_60fe_sne
-        m_al26_new = m_al26_old + al26_inj
-        m_fe60_new = m_fe60_old + fe60_inj
-        # Write to cluster
-        cluster[j].M_al26 = m_al26_new
-        cluster[j].M_fe60 = m_fe60_new
-
+    if mdot == 0.0 | msolyr:
+      if cluster[i].kicked == False:
+        # Alert user, a supernovae is a big event afterall! Think of all the bright eyed particle physics postgrads stuck down a mineshaft at Super Kamiokande! They live to see that kind of thing!
+        bar.write("Star #{} has gone supernova!".format(i))
+        # Get supernoave yield for star
+        al26_sn = cluster[i].al26_sn_yield
+        fe60_sn = cluster[i].fe60_sn_yield
+        # Now check each star to deposit SLRs
+        for j in lm_id:
+          d = calc_star_distance(gravity.particles[i],gravity.particles[j])
+          if d < r_bub_local_sne:
+            r_disk   = cluster[j].r_disk
+            eta_disk = calc_eta_disk_sne(r_disk,d)
+            al26_inj = al26_sn * eta_disk
+            fe60_inj = fe60_sn * eta_disk
+            # Store as appropriate
+            cluster[j].mass_26al_sne += al26_inj
+            cluster[j].mass_60fe_sne += fe60_inj
+        # Enable kick flag, to ensure this doesn't repeat in the next iteration
+        cluster[i].kicked = True
+  
   ### HOUSEKEEPING ROUTINES
   # Update progress bar using dt value
   # This is a fairly brute force way of doing it, but the progress bar has always been a bit
   # Inaccurate when it comes to indeterminate numbers of steps
   prog_old = bar.n
-  prog_new = (t_new / t_f)
+  prog_new = t_new.value_in(myr)
   prog_del = prog_new - prog_old
   bar.update(prog_del)
   # Update the conditions of metadata object
@@ -734,9 +850,12 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
   nfile = metadata.most_recent_checkpoint
   save_checkpoint(filename,nfile,cluster,converter,yields,metadata,bar=bar)
 
-  # Finish simulation and return, if finish = False, then this will be run again inside a loop in
-  # the main function
+  t_fin_func = time()
+  if metadata.args.verbose:
+    bar.write("! Finished step t = {:.3f} Myr, took {:.3f} sec".format(t_new.value_in(myr),t_fin_func - t_start_func))
 
+  # the main function
+  # Finish simulation and return, if finish = False, then this will be run again inside a loop in
   return cluster,gravity,stellar,yields,metadata,finish,bar
 
 def get_high_mass_star_indices(cluster):
@@ -748,17 +867,17 @@ def get_high_mass_star_indices(cluster):
   O(n)
 
   Inputs:
-    - cluster: The cluster particule array, which has the high_mass flag for each star
+    - cluster: The cluster particle array, which has the masses for each star
   Outputs:
-    - hm_id: an array of high mass stars indices
-    - lm_id: an array of low mass star indices
+    - hm_id: an array of high mass stars indices (high mass defined as >= 13 Msol)
+    - lm_id: an array of low mass star indices (low mass defined as <= 3 Msol)
   """
   hm_id = []
   lm_id = []
   for i,star in enumerate(cluster):
-    if star.high_mass == True:
+    if star.mass >= 12.0 | msol:
       hm_id.append(i)
-    else:
+    if star.mass <= 3.0 | msol:
       lm_id.append(i)
   return hm_id,lm_id
 
@@ -1001,8 +1120,9 @@ def init_cluster(model, nstars, Rc, SLRs, nmass=3):
     star.mass_60fe_global = 0.0 | kg
     star.mass_60fe_sne    = 0.0 | kg 
     # Mass dependent based on bracketing (if a star is massive or not)
+    ## High mass group, stars greater than 13 solar masses (minimum value in Limongi & Cheiffi)
+
     if star.mass >= 13.0 | msol:
-      star.high_mass = True
       star.disk_alive = False # Massive stellar disk not simulated
       star.total_wind_loss = calc_total_mass_loss(star.mass)
       # Wind yields for each SLR
@@ -1023,12 +1143,10 @@ def init_cluster(model, nstars, Rc, SLRs, nmass=3):
       star.sn_yield_60fe = calc_slr_yield(star.mass,
                                           SLRs["Fe60"].sne_mass,
                                           SLRs["Fe60"].sne_yield) # 60Fe yield
-    elif star.mass < 13.0 | msol:
-      star.high_mass = False
+    if star.mass <= 3.0 | msol:
       star.disk_alive = True
       star.total_wind_loss = 0.0 | msol # Mass loss for low mass stellar winds can be neglected
-    else:
-      raise Exception("Somehow a star has a weird mass!")
+
 
   # Finish up and return cluster
   print("Cluster done!")
@@ -1078,7 +1196,23 @@ def main(args):
     used_checkpoint = True
 
   # Initialise N-Body simulation
-  gravity = gravity_model(converter,number_of_workers=8)
+
+  if gravity_model == "hermite":
+    from amuse.lab import Hermite
+    gravity = Hermite(converter,number_of_workers=workers)
+  elif gravity_model == "bhtree":
+    from amuse.community.bhtree.interface import BHTree
+    gravity = BHTree(converter,number_of_workers=workers)
+  elif gravity_model == "ph4":
+    from amuse.community.ph4.interface import ph4
+    gravity = ph4(converter,number_of_workers=workers)
+    gravity.parameters.use_gpu = True
+  elif gravity_model == "hermite0":
+    from amuse.community.hermite0.interface import Hermite
+    gravity = Hermite(converter,number_of_workers=workers,mode="GPU")
+  else:
+    raise ValueError("Invalid N body solver selection!")
+
   gravity.particles.add_particles(cluster)
   # Initialise stellar evolution simulation
   stellar = stellar_model()
@@ -1088,7 +1222,7 @@ def main(args):
     # Change simulation times
     gravity.model_time = metadata.time
     stellar.model_time = metadata.time
-  
+
   if used_checkpoint == False:
     # Generate the rest of the simulation data
     metadata = Metadata(args,t_f) # Metadata object
@@ -1098,14 +1232,15 @@ def main(args):
     save_checkpoint(metadata.filename,0,cluster,converter,yields,metadata)
 
   # Initialise progress bar
-  bar = tqdm(total = 1.0,desc="Simulation",position=0)
+  bar = tqdm(total = t_f.value_in(myr),desc="Simulation",position=0,unit="Myr")
   # Begin simulation, open ended until finish is true
   finish = False
   while finish == False:
     cluster,gravity,stellar,yields,metadata,finish,bar = evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,bar)
-  print("!!! Finished !!!")
   gravity.stop()
   stellar.stop()
+  bar.close()
+  print("!!! Finished !!!")
   return
 
 if __name__ == "__main__":
@@ -1114,9 +1249,11 @@ if __name__ == "__main__":
   parser.add_argument("-rc", default=None, type=float, help="Cluster radius (pc)")
   parser.add_argument("-r","--reload", type=str, default="", help="Base name of files to RELOAD")
   parser.add_argument("-nc", "--n_checkpoint",type=int,default=None,help="Which checkpoint file to load, defaults to highest number")
-  parser.add_argument("-m", "--model", type=str, default="plummer", help="Which model to use, defaults to Plummer sphere")
-  parser.add_argument("-f","--filename",type=str,default="",help="Base name for files to SAVE, i.e. \"<filename>-yields.csv\", by default adopts the convention \"simulation-YY-MM-DD-HH-MM-SS\" based on sim start time")
+  parser.add_argument("-m", "--model", type=str, default="plummer", help="Which model to use, defaults to Plummer sphere, can also use fractal model")
+  parser.add_argument("-d","--fractal_dimension",type=float,default=2.0,help="Dimension parameter for fractal model")
+  parser.add_argument("-f","--filename",type=str,default="",help="Base name for files to SAVE, i.e. \"<filename>-yields.csv\", by default adopts the convention \"simulation-YY-MM-DD-HH-MM-SS\" based on sim start time") 
   parser.add_argument("-t_f","--final_time",type=float,default=10.0,help="Final time to simulate to in Myr")
+  parser.add_argument("-v","--verbose",action="store_true",help="Print additional statements")
   # Finish parser, and start running main function
   args = parser.parse_args()
   main(args)

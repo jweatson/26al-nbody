@@ -151,3 +151,26 @@ Then its:
   - [ ] Push contents
 - [ ] Perform checks, devise some unit tests
 - [ ] Need to show some graphical tests wrt constant injection etc. for the paper
+
+16/09/23
+- Right things work however I've determined that the disk routines are painfully slow, taking up about 98% of execution time after switching to faster N body codes
+- They also scale very badly, as such, we gotta bust out jit
+
+Jit can be used to make a very clunky, but fairly fast execution loop, however:
+  - Certain sections of code have to be spun out as a series of numpy arrays, this should be comparatively fast, but would be a sticking point
+  - High mass and low mass indices can be carried over, and used to determine which values get calculated, some slight memory overhead in terms of array sizes, and empty data, but that should work
+  - Parallelise lm_id loop, have that be outer loop, its much faster that way
+  - Afterwards, values can just be added back to the python array, I believe you can modify columns in amuse en-masse, but you have to test this first!
+    - Create an array of ascending values, add to zeroed out column
+  - So current execution loop:
+    - Find lm_id and hm_id, already done
+    - inputs:
+      - hm_id
+      - lm_id
+      - vx,vy,vz
+      - x,y,z
+      - mdot
+      - wind_ratio
+      > **THIS NOW HAS TO BE DONE FOR EACH SLR**
+      > **ALL OF THESE MUST BE DONE IN FLOATS**
+      - (r disk is now a constant, don't adjust)
