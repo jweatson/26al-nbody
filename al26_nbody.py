@@ -1,6 +1,6 @@
 """
 26al-nbody.py
-- This programme is meant to run as a 
+- This programme is meant to run as a standalone application, but the functions can be spun out!
 - This is a "spiritual successor" to the work by: Lichtenberg, T., Parker, R.J. & Meyer, M.R. (2016)
   which covers 60Fe and 26Al enrichment of protostellar disks by supernoava injection
     Lichtenberg, T., Parker, R. J., & Meyer, M. R. (2016).
