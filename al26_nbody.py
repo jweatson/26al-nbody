@@ -126,21 +126,27 @@ class Yields():
     """
     # Initialise each array, each SLR needs both global and local model storage
     ## 26Al
-    self.filename        = filename
-    self.time            = []
-    self.local_26al      = []
-    self.global_26al     = []
-    self.sne_26al        = []
-    self.sum_local_26al  = []
-    self.sum_global_26al = []
-    self.sum_sne_26al    = []
-    self.local_60fe      = []
-    self.global_60fe     = []
-    self.sne_60fe        = []
-    self.sum_local_60fe  = []
-    self.sum_global_60fe = []
-    self.sum_sne_60fe    = []
-    self.first_write     = True
+    self.filename          = filename
+    self.time              = []
+    self.local_26al        = []
+    self.global_26al       = []
+    self.sne_26al          = []
+    self.sum_local_26al    = []
+    self.sum_global_26al   = []
+    self.sum_sne_26al      = []
+    self.local_60fe        = []
+    self.global_60fe       = []
+    self.sne_60fe          = []
+    self.sum_local_60fe    = []
+    self.sum_global_60fe   = []
+    self.sum_sne_60fe      = []
+    self.local_26al_final  = []
+    self.global_26al_final = []
+    self.sne_26al_final    = []
+    self.local_60fe_final  = []
+    self.global_60fe_final = []
+    self.sne_60fe_final    = []
+    self.first_write       = True
     return 
   def update_state(self,model_time,cluster):
     """
@@ -168,14 +174,13 @@ class Yields():
     self.sum_local_60fe.append(sum(list(cluster.mass_60fe_local.value_in(msol))))
     self.sum_global_60fe.append(sum(list(cluster.mass_60fe_global.value_in(msol))))
     self.sum_sne_60fe.append(sum(list(cluster.mass_60fe_sne.value_in(msol))))
-
     # Additionally, copy the current instance of the `final` yields
-    self.local_26_al_final = cluster.mass_26al_local_final.value_in(msol)
-    self.local_26_al_final = cluster.mass_26al_global_final.value_in(msol) 
-    self.local_26_al_final = cluster.mass_26al_sne_final.value_in(msol)    
-    self.local_26_al_final = cluster.mass_60fe_local_final.value_in(msol)  
-    self.local_26_al_final = cluster.mass_60fe_global_final.value_in(msol) 
-    self.local_26_al_final = cluster.mass_60fe_sne_final.value_in(msol)
+    self.local_26al_final  = list(cluster.mass_26al_local_final.value_in(msol))
+    self.global_26al_final = list(cluster.mass_26al_global_final.value_in(msol))
+    self.sne_26al_final    = list(cluster.mass_26al_sne_final.value_in(msol))
+    self.local_60fe_final  = list(cluster.mass_60fe_local_final.value_in(msol))
+    self.global_60fe_final = list(cluster.mass_60fe_global_final.value_in(msol))
+    self.sne_60fe_final    = list(cluster.mass_60fe_sne_final.value_in(msol))
     # You need to write something to this to fix edge case where disk has not decayed, this should be doable
 
     # Write CSV header first, this is written in such a way that restoring the yields object should not cause this to rewrite
