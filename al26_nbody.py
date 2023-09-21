@@ -49,9 +49,10 @@ warnings.simplefilter('ignore', category=NumbaDeprecationWarning)
 warnings.simplefilter('ignore', category=NumbaPendingDeprecationWarning)
 
 # GLOBAL VALUES
-n_plot = 2500 # Number of checkpoints to make
+n_plot           = 1000 # Number of checkpoints to make
+steps_per_plot   = 10 # Number of substeps to make per write
 module_directory = os.path.dirname(os.path.abspath(sys.argv[0]))
-workers = 8
+workers          = 8
 ### MODELS
 gravity_model = "bhtree" # Currently using the Hermite model as it runs fine single threaded on M1
 stellar_model = SeBa    # Using SeBa as it is fast and relatively accurate
@@ -167,6 +168,16 @@ class Yields():
     self.sum_local_60fe.append(sum(list(cluster.mass_60fe_local.value_in(msol))))
     self.sum_global_60fe.append(sum(list(cluster.mass_60fe_global.value_in(msol))))
     self.sum_sne_60fe.append(sum(list(cluster.mass_60fe_sne.value_in(msol))))
+
+    # Additionally, copy the current instance of the `final` yields
+    self.local_26_al_final = cluster.mass_26al_local_final.value_in(msol)
+    self.local_26_al_final = cluster.mass_26al_global_final.value_in(msol) 
+    self.local_26_al_final = cluster.mass_26al_sne_final.value_in(msol)    
+    self.local_26_al_final = cluster.mass_60fe_local_final.value_in(msol)  
+    self.local_26_al_final = cluster.mass_60fe_global_final.value_in(msol) 
+    self.local_26_al_final = cluster.mass_60fe_sne_final.value_in(msol)
+    # You need to write something to this to fix edge case where disk has not decayed, this should be doable
+
     # Write CSV header first, this is written in such a way that restoring the yields object should not cause this to rewrite
     if self.first_write == True:
       self.write_csv_header()
@@ -186,7 +197,7 @@ class Yields():
     Append to global yields file, this is done every step
     """
     with open("{}-cluster-yields.csv".format(self.filename),"a") as f:
-      f.write("{:3e},{:3e},{:3e},{:3e},{:3e}\n".format(
+      f.write("{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e}\n".format(
         self.time[-1],
         self.sum_local_26al[-1],
         self.sum_global_26al[-1],
@@ -353,7 +364,7 @@ def save_checkpoint(filename,nfile,cluster,converter,yields,metadata,bar=None):
     if bar is None:
       print("Done! Took {:3f} seconds!".format(t4-t3))
     else:
-      bar.write("Saving checkpoint #{}... Done! Took {:3f} seconds!".format(str(nfile).zfill(5),t4-t1),refresh=True)
+      bar.write("Saving checkpoint #{}... Done! Took {:3f} seconds!".format(str(nfile).zfill(5),t4-t1))
   return
 
 def load_checkpoint(filename,nfile):
@@ -584,7 +595,7 @@ def calc_wind_abs(lm_id_arr,hm_id_arr,
       wind_abs_arr[lm] += wind_abs
   return wind_abs_arr
 
-def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,bar):
+def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,bar,save):
   """
   Evolve simulation with an adaptive timestep
 
@@ -659,7 +670,7 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
       raise ValueError("Key mismatch between stellar, cluster and gravity particles, simulation cannot continue!")
   t_fin_init = time()
   # Calculate timestep, previously we used a variable timestep, but it was extremely slow for some reason
-  dt = t_f / n_plot
+  dt = t_f / (n_plot * steps_per_plot)
   t_new = t + dt
 
   if metadata.args.verbose:
@@ -817,8 +828,8 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
         # Alert user, a supernovae is a big event afterall! Think of all the bright eyed particle physics postgrads stuck down a mineshaft at Super Kamiokande! They live to see that kind of thing!
         bar.write("Star #{} has gone supernova!".format(i))
         # Get supernoave yield for star
-        al26_sn = cluster[i].al26_sn_yield
-        fe60_sn = cluster[i].fe60_sn_yield
+        al26_sn = cluster[i].sn_yield_26al
+        fe60_sn = cluster[i].sn_yield_60fe
         # Now check each star to deposit SLRs
         for j in lm_id:
           d = calc_star_distance(gravity.particles[i],gravity.particles[j])
@@ -832,6 +843,40 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
             cluster[j].mass_60fe_sne += fe60_inj
         # Enable kick flag, to ensure this doesn't repeat in the next iteration
         cluster[i].kicked = True
+
+  ### DECAY ROUTINES
+  # Progressively remove SLRs from disks through radioactive decay
+  t_start_decay = time()
+  half_life_26al = 0.717 | myr
+  half_life_60fe = 2.600 | myr
+  decay_frac_26al = np.exp((-dt*0.693147)/half_life_26al)
+  decay_frac_60fe = np.exp((-dt*0.693147)/half_life_60fe)
+  # Perform decay
+  # For 26Al variables
+  cluster.mass_26al_local  *= decay_frac_26al
+  cluster.mass_26al_global *= decay_frac_26al
+  cluster.mass_26al_sne    *= decay_frac_26al
+  # For 60Fe variables
+  cluster.mass_60fe_local  *= decay_frac_60fe
+  cluster.mass_60fe_global *= decay_frac_60fe
+  cluster.mass_60fe_sne    *= decay_frac_60fe
+  t_fin_decay = time()
+  if metadata.args.verbose:
+    bar.write("t = {:.3f} Myr: Finished decay, took {:.3f} sec".format(t_new.value_in(myr),t_fin_decay - t_start_decay))
+
+  ### CONDENSE ROUTINES
+  for i in lm_id:
+    if cluster[i].disk_alive == True:
+      if cluster[i].tau_disk <= t_new:
+        cluster[i].mass_26al_local_final  = cluster[i].mass_26al_local
+        cluster[i].mass_26al_global_final = cluster[i].mass_26al_global
+        cluster[i].mass_26al_sne_final    = cluster[i].mass_26al_sne
+        cluster[i].mass_60fe_local_final  = cluster[i].mass_60fe_local
+        cluster[i].mass_60fe_global_final = cluster[i].mass_60fe_global
+        cluster[i].mass_60fe_sne_final    = cluster[i].mass_60fe_sne
+        if metadata.args.verbose:
+          bar.write("Disk of low-mass star #{} has condensed".format(i))
+        cluster[i].disk_alive = False
   
   ### HOUSEKEEPING ROUTINES
   # Update progress bar using dt value
@@ -841,14 +886,16 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
   prog_new = t_new.value_in(myr)
   prog_del = prog_new - prog_old
   bar.update(prog_del)
-  # Update the conditions of metadata object
-  metadata.update(t_new)
-  # Update yields
-  yields.update_state(gravity.model_time,cluster)
-  # Save data to checkpoint
-  filename = metadata.filename
-  nfile = metadata.most_recent_checkpoint
-  save_checkpoint(filename,nfile,cluster,converter,yields,metadata,bar=bar)
+
+  if save == True:
+    # Update the conditions of metadata object
+    metadata.update(t_new)
+    # Update yields
+    yields.update_state(gravity.model_time,cluster)
+    # Save data to checkpoint
+    filename = metadata.filename
+    nfile = metadata.most_recent_checkpoint
+    save_checkpoint(filename,nfile,cluster,converter,yields,metadata,bar=bar)
 
   t_fin_func = time()
   if metadata.args.verbose:
@@ -1113,12 +1160,20 @@ def init_cluster(model, nstars, Rc, SLRs, nmass=3):
     star.mass_27al = 8.500e-6 * star.mass # Calculate stable Al mass from Chrondritic samples
     star.mass_26al_local  = 0.0 | kg
     star.mass_26al_global = 0.0 | kg
-    star.mass_26al_sne    = 0.0 | kg 
+    star.mass_26al_sne    = 0.0 | kg
+    # Final masses of aluminium
+    star.mass_26al_local_final  = 0.0 | kg
+    star.mass_26al_global_final = 0.0 | kg
+    star.mass_26al_sne_final    = 0.0 | kg
     ## Iron group
     star.mass_56fe = 1.828e-4 * star.mass # Claculate stable Fe mass from Chrondritic samples
     star.mass_60fe_local  = 0.0 | kg
     star.mass_60fe_global = 0.0 | kg
-    star.mass_60fe_sne    = 0.0 | kg 
+    star.mass_60fe_sne    = 0.0 | kg
+    # Final masses of iron
+    star.mass_60fe_local_final  = 0.0 | kg
+    star.mass_60fe_global_final = 0.0 | kg
+    star.mass_60fe_sne_final    = 0.0 | kg
     # Mass dependent based on bracketing (if a star is massive or not)
     ## High mass group, stars greater than 13 solar masses (minimum value in Limongi & Cheiffi)
 
@@ -1235,8 +1290,15 @@ def main(args):
   bar = tqdm(total = t_f.value_in(myr),desc="Simulation",position=0,unit="Myr")
   # Begin simulation, open ended until finish is true
   finish = False
+  save   = False
+  n_iter = 0
   while finish == False:
-    cluster,gravity,stellar,yields,metadata,finish,bar = evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,bar)
+    if n_iter % steps_per_plot == 0:
+      save = True
+    else:
+      save = False
+    cluster,gravity,stellar,yields,metadata,finish,bar = evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,bar,save)
+    n_iter += 1
   gravity.stop()
   stellar.stop()
   bar.close()
@@ -1252,7 +1314,7 @@ if __name__ == "__main__":
   parser.add_argument("-m", "--model", type=str, default="plummer", help="Which model to use, defaults to Plummer sphere, can also use fractal model")
   parser.add_argument("-d","--fractal_dimension",type=float,default=2.0,help="Dimension parameter for fractal model")
   parser.add_argument("-f","--filename",type=str,default="",help="Base name for files to SAVE, i.e. \"<filename>-yields.csv\", by default adopts the convention \"simulation-YY-MM-DD-HH-MM-SS\" based on sim start time") 
-  parser.add_argument("-t_f","--final_time",type=float,default=10.0,help="Final time to simulate to in Myr")
+  parser.add_argument("-t_f","--final_time",type=float,default=20.0,help="Final time to simulate to in Myr")
   parser.add_argument("-v","--verbose",action="store_true",help="Print additional statements")
   # Finish parser, and start running main function
   args = parser.parse_args()
