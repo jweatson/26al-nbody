@@ -49,8 +49,8 @@ warnings.simplefilter('ignore', category=NumbaDeprecationWarning)
 warnings.simplefilter('ignore', category=NumbaPendingDeprecationWarning)
 
 # GLOBAL VALUES
-n_plot           = 1000 # Number of checkpoints to make
-steps_per_plot   = 10 # Number of substeps to make per write
+n_plot           = 100 # Number of checkpoints to make
+steps_per_plot   = 10  # Number of substeps to make per write
 module_directory = os.path.dirname(os.path.abspath(sys.argv[0]))
 workers          = 8
 ### MODELS
@@ -665,10 +665,10 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
   # Generate a list of indices for high mass and low mass stars
   hm_id,lm_id = get_high_mass_star_indices(cluster)
   # If all stars have gone supernovae, or gone below high mass threshold, immediately end simulation
-  if len(hm_id) == 0:
-    bar.write("!!! NO HIGH MASS STARS REMAINING, FINISHING SIMULATION !!!")
-    finish = True
-    return cluster,gravity,stellar,yields,metadata,finish,bar
+  # if len(hm_id) == 0:
+  #   bar.write("!!! NO HIGH MASS STARS REMAINING, FINISHING SIMULATION !!!")
+  #   finish = True
+  #   return cluster,gravity,stellar,yields,metadata,finish,bar
   # Quick sanity check that keys are same this should not happen based on my understanding of AMUSE but it's to be safe
   for i,star in enumerate(cluster):
     if star.key != stellar.particles[i].key or star.key != gravity.particles[i].key:
@@ -765,89 +765,91 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
   # There are probably more reasonable ways to do this, however this is the fastest implementation I could think of
   # Previous version used an entirely python prescription, though this was extremely slower, by around 5 OOM
   # This is passed onto a JIT compiled, nopython function, original python implementation took ~98% of total load
-  t_start_winds = time()
-  # First, split arrays such that they can be read into a NUMBA compliant function (pandas splitting is efficient, accelerated)
-  x_arr     = gravity.particles.x.value_in(units.km)
-  y_arr     = gravity.particles.y.value_in(units.km)
-  z_arr     = gravity.particles.z.value_in(units.km)
-  vx_arr    = gravity.particles.vx.value_in(units.km/units.s)
-  vy_arr    = gravity.particles.vy.value_in(units.km/units.s)
-  vz_arr    = gravity.particles.vz.value_in(units.km/units.s)
-  mdot_arr  = - stellar.particles.wind_mass_loss_rate.value_in(units.kg/units.s)
-  rdisk_arr = cluster.r_disk.value_in(units.km)
-  wind_ratio_26al_arr = cluster.wind_ratio_26al
-  wind_ratio_60fe_arr = cluster.wind_ratio_60fe
-  # Calculate wind absorption from Global model 
-  wind_abs_global_26al = calc_wind_abs(lm_id,hm_id,
-                                       x_arr,y_arr,z_arr,
-                                       vx_arr,vy_arr,vz_arr,
-                                       mdot_arr,
-                                       wind_ratio_26al_arr,
-                                       rdisk_arr,
-                                       distance_limit = 0.0,
-                                       bubble_radius = 2 * Rc.value_in(units.km),
-                                       dt = dt.value_in(units.s)) | kg
-  wind_abs_global_60fe = calc_wind_abs(lm_id,hm_id,
-                                       x_arr,y_arr,z_arr,
-                                       vx_arr,vy_arr,vz_arr,
-                                       mdot_arr,
-                                       wind_ratio_60fe_arr,
-                                       rdisk_arr,
-                                       distance_limit = 0.0,
-                                       bubble_radius = 2 * Rc.value_in(units.km),
-                                       dt = dt.value_in(units.s)) | kg
-  # Now calculate wind absorption from Local model
-  wind_abs_local_26al = calc_wind_abs(lm_id,hm_id,
-                                      x_arr,y_arr,z_arr,
-                                      vx_arr,vy_arr,vz_arr,
-                                      mdot_arr,
-                                      wind_ratio_26al_arr,
-                                      rdisk_arr,
-                                      distance_limit = r_bub_local_wind.value_in(units.km),
-                                      bubble_radius = r_bub_local_wind.value_in(units.km),
-                                      dt = dt.value_in(units.s)) | kg
-  wind_abs_local_60fe = calc_wind_abs(lm_id,hm_id,
-                                      x_arr,y_arr,z_arr,
-                                      vx_arr,vy_arr,vz_arr,
-                                      mdot_arr,
-                                      wind_ratio_60fe_arr,
-                                      rdisk_arr,
-                                      distance_limit = r_bub_local_wind.value_in(units.km),
-                                      bubble_radius = r_bub_local_wind.value_in(units.km),
-                                      dt = dt.value_in(units.s)) | kg
-  # Finish up! Copy values back into original wind arrays, also fast, because this is accelerated
-  cluster.mass_26al_global += wind_abs_global_26al 
-  cluster.mass_60fe_global += wind_abs_global_60fe
-  cluster.mass_26al_local  += wind_abs_local_26al
-  cluster.mass_60fe_local  += wind_abs_local_60fe
-  t_fin_winds = time() 
-  if metadata.args.verbose:
-    bar.write("t = {:.3f} Myr: Finished winds, took {:.3f} sec".format(t_new.value_in(myr),t_fin_winds - t_start_winds))
+  if len(hm_id) > 0:
+    t_start_winds = time()
+    # First, split arrays such that they can be read into a NUMBA compliant function (pandas splitting is efficient, accelerated)
+    x_arr     = gravity.particles.x.value_in(units.km)
+    y_arr     = gravity.particles.y.value_in(units.km)
+    z_arr     = gravity.particles.z.value_in(units.km)
+    vx_arr    = gravity.particles.vx.value_in(units.km/units.s)
+    vy_arr    = gravity.particles.vy.value_in(units.km/units.s)
+    vz_arr    = gravity.particles.vz.value_in(units.km/units.s)
+    mdot_arr  = - stellar.particles.wind_mass_loss_rate.value_in(units.kg/units.s)
+    rdisk_arr = cluster.r_disk.value_in(units.km)
+    wind_ratio_26al_arr = cluster.wind_ratio_26al
+    wind_ratio_60fe_arr = cluster.wind_ratio_60fe
+    # Calculate wind absorption from Global model 
+    wind_abs_global_26al = calc_wind_abs(lm_id,hm_id,
+                                        x_arr,y_arr,z_arr,
+                                        vx_arr,vy_arr,vz_arr,
+                                        mdot_arr,
+                                        wind_ratio_26al_arr,
+                                        rdisk_arr,
+                                        distance_limit = 0.0,
+                                        bubble_radius = 2 * Rc.value_in(units.km),
+                                        dt = dt.value_in(units.s)) | kg
+    wind_abs_global_60fe = calc_wind_abs(lm_id,hm_id,
+                                        x_arr,y_arr,z_arr,
+                                        vx_arr,vy_arr,vz_arr,
+                                        mdot_arr,
+                                        wind_ratio_60fe_arr,
+                                        rdisk_arr,
+                                        distance_limit = 0.0,
+                                        bubble_radius = 2 * Rc.value_in(units.km),
+                                        dt = dt.value_in(units.s)) | kg
+    # Now calculate wind absorption from Local model
+    wind_abs_local_26al = calc_wind_abs(lm_id,hm_id,
+                                        x_arr,y_arr,z_arr,
+                                        vx_arr,vy_arr,vz_arr,
+                                        mdot_arr,
+                                        wind_ratio_26al_arr,
+                                        rdisk_arr,
+                                        distance_limit = r_bub_local_wind.value_in(units.km),
+                                        bubble_radius = r_bub_local_wind.value_in(units.km),
+                                        dt = dt.value_in(units.s)) | kg
+    wind_abs_local_60fe = calc_wind_abs(lm_id,hm_id,
+                                        x_arr,y_arr,z_arr,
+                                        vx_arr,vy_arr,vz_arr,
+                                        mdot_arr,
+                                        wind_ratio_60fe_arr,
+                                        rdisk_arr,
+                                        distance_limit = r_bub_local_wind.value_in(units.km),
+                                        bubble_radius = r_bub_local_wind.value_in(units.km),
+                                        dt = dt.value_in(units.s)) | kg
+    # Finish up! Copy values back into original wind arrays, also fast, because this is accelerated
+    cluster.mass_26al_global += wind_abs_global_26al 
+    cluster.mass_60fe_global += wind_abs_global_60fe
+    cluster.mass_26al_local  += wind_abs_local_26al
+    cluster.mass_60fe_local  += wind_abs_local_60fe
+    t_fin_winds = time() 
+    if metadata.args.verbose:
+      bar.write("t = {:.3f} Myr: Finished winds, took {:.3f} sec".format(t_new.value_in(myr),t_fin_winds - t_start_winds))
 
   ### SUPERNOVA ROUTINES
   # This one doesn't have to be written for numba, since it will only happen every time a supernova occurs, so a handful of times per simulation
-  for i in hm_id:
-    mdot = - stellar.particles[i].wind_mass_loss_rate
-    if mdot == 0.0 | msolyr:
-      if cluster[i].kicked == False:
-        # Alert user, a supernovae is a big event afterall! Think of all the bright eyed particle physics postgrads stuck down a mineshaft at Super Kamiokande! They live to see that kind of thing!
-        bar.write("Star #{} has gone supernova!".format(i))
-        # Get supernoave yield for star
-        al26_sn = cluster[i].sn_yield_26al
-        fe60_sn = cluster[i].sn_yield_60fe
-        # Now check each star to deposit SLRs
-        for j in lm_id:
-          d = calc_star_distance(gravity.particles[i],gravity.particles[j])
-          if d < r_bub_local_sne:
-            r_disk   = cluster[j].r_disk
-            eta_disk = calc_eta_disk_sne(r_disk,d)
-            al26_inj = al26_sn * eta_disk
-            fe60_inj = fe60_sn * eta_disk
-            # Store as appropriate
-            cluster[j].mass_26al_sne += al26_inj
-            cluster[j].mass_60fe_sne += fe60_inj
-        # Enable kick flag, to ensure this doesn't repeat in the next iteration
-        cluster[i].kicked = True
+  if len(hm_id) > 0:
+    for i in hm_id:
+      mdot = - stellar.particles[i].wind_mass_loss_rate
+      if mdot == 0.0 | msolyr:
+        if cluster[i].kicked == False:
+          # Alert user, a supernovae is a big event afterall! Think of all the bright eyed particle physics postgrads stuck down a mineshaft at Super Kamiokande! They live to see that kind of thing!
+          bar.write("Star #{} has gone supernova!".format(i))
+          # Get supernoave yield for star
+          al26_sn = cluster[i].sn_yield_26al
+          fe60_sn = cluster[i].sn_yield_60fe
+          # Now check each star to deposit SLRs
+          for j in lm_id:
+            d = calc_star_distance(gravity.particles[i],gravity.particles[j])
+            if d < r_bub_local_sne:
+              r_disk   = cluster[j].r_disk
+              eta_disk = calc_eta_disk_sne(r_disk,d)
+              al26_inj = al26_sn * eta_disk
+              fe60_inj = fe60_sn * eta_disk
+              # Store as appropriate
+              cluster[j].mass_26al_sne += al26_inj
+              cluster[j].mass_60fe_sne += fe60_inj
+          # Enable kick flag, to ensure this doesn't repeat in the next iteration
+          cluster[i].kicked = True
 
   ### DECAY ROUTINES
   # Progressively remove SLRs from disks through radioactive decay
@@ -927,7 +929,7 @@ def get_high_mass_star_indices(cluster):
   hm_id = []
   lm_id = []
   for i,star in enumerate(cluster):
-    if star.mass >= 12.0 | msol:
+    if star.mass >= 13.0 | msol:
       hm_id.append(i)
     if star.mass <= 3.0 | msol:
       lm_id.append(i)
@@ -1065,6 +1067,7 @@ def generate_masses(nstars):
   Generate a series of masses for stars using the Maschberger IMF, ensures that at least 1 massive star is included
   """
 
+  @nb.njit
   def maschberger(m,G_lower,G_upper):
     mu = 0.2 # Average star mass
     a  = 2.3 # Low mass component
@@ -1078,31 +1081,54 @@ def generate_masses(nstars):
     a  = 2.3 # Low mass component
     b  = 1.4 # High mass component
     return (1 + ((m/mu)**(1-a)))**(1-b)
+  
+  @nb.njit
+  def gen_mass(G_lower,G_upper,pm_lower,pm_upper,min_mass,max_mass,nstars):
+    masses = np.zeros(nstars)
+    i = 0
+    while i < nstars:
+      m = np.random.uniform(min_mass,max_mass)
+      pm = np.random.uniform(pm_lower,pm_upper)
+      if pm < maschberger(m,G_lower,G_upper):
+        masses[i] = m
+        i += 1
+    return masses
 
   m_lower  = 0.01
-  m_upper  = 150
+  m_upper  = 60
   G_lower  = maschberger_aux(m_lower)
   G_upper  = maschberger_aux(m_upper)
   pm_upper = maschberger(m_lower,G_lower,G_upper)
   pm_lower = maschberger(m_upper,G_lower,G_upper)
   masses   = []
 
-  min_mass = 0.1 # Limit to red dwarfs
-  max_mass = 50. # No supermassive stars 
+  min_mass = 0.1  # Limit to red dwarfs
+  max_mass = 120. # No supermassive stars 
 
   # Generate mass distribution 
-  with tqdm(total=nstars) as pbar:
-    while len(masses) < nstars:
-      m  = uniform(min_mass,max_mass)
-      pm = uniform(pm_lower,pm_upper)
-      if pm < maschberger(m,G_lower,G_upper):
-        masses.append(m)
-        pbar.update(1)
-  pbar.close()
+  # with tqdm(total=nstars) as bar:
+  #   while len(masses) < nstars:
+  #     m  = uniform(min_mass,max_mass)
+  #     pm = uniform(pm_lower,pm_upper)
+  #     if pm < maschberger(m,G_lower,G_upper):
+  #       masses.append(m)
+  #       bar.update(1)
+  #       if m >= 13.0:
+  #         bar.write("Star of mass {:.2f} Msol generated".format(m))
+  # bar.close()
   # Check to see if a high mass star is present
+
+  print("Sampling masses... ",end="")
+  masses = gen_mass(G_lower,G_upper,pm_lower,pm_upper,min_mass,max_mass,nstars)
   if max(masses) < 13.0:
     print("No massive stars in cluster! Re-rolling!")
     masses = generate_masses(nstars)
+  else:
+    ii = 0
+    for i,mass in enumerate(masses):
+      if mass > 13.0:
+        ii += 1
+    print("Finished! {} massive stars generated".format(ii))
   # Convert list into array
   masses = np.asarray(masses)
   return masses
@@ -1119,14 +1145,13 @@ def init_cluster(model, nstars, Rc, SLRs, nmass=3):
     - cluster: An array containing a series of stars
   """
 
-  print("Sampling masses...")
   # First, generate a series of masses
   masses = generate_masses(nstars)
   # Set basic simulation parameters
   Mcluster  = sum(masses) | msol
-  print("Done! Generating cluster...")
 
   # Now create the cluster
+  print("Generating cluster...")
   masses    = masses | msol # Convert to AMUSE units
   converter = nbody_system.nbody_to_si(Rc,Mcluster) # Create nbody units converter
   # Build the cluster based on a plummer model
@@ -1266,7 +1291,6 @@ def main(args):
   elif gravity_model == "ph4":
     from amuse.community.ph4.interface import ph4
     gravity = ph4(converter,number_of_workers=workers)
-    gravity.parameters.use_gpu = True
   elif gravity_model == "hermite0":
     from amuse.community.hermite0.interface import Hermite
     gravity = Hermite(converter,number_of_workers=workers,mode="GPU")
@@ -1319,7 +1343,7 @@ if __name__ == "__main__":
   parser.add_argument("-m", "--model", type=str, default="plummer", help="Which model to use, defaults to Plummer sphere, can also use fractal model")
   parser.add_argument("-d","--fractal_dimension",type=float,default=2.0,help="Dimension parameter for fractal model")
   parser.add_argument("-f","--filename",type=str,default="",help="Base name for files to SAVE, i.e. \"<filename>-yields.csv\", by default adopts the convention \"simulation-YY-MM-DD-HH-MM-SS\" based on sim start time") 
-  parser.add_argument("-t_f","--final_time",type=float,default=20.0,help="Final time to simulate to in Myr")
+  parser.add_argument("-t_f","--final_time",type=float,default=10.0,help="Final time to simulate to in Myr")
   parser.add_argument("-v","--verbose",action="store_true",help="Print additional statements")
   # Finish parser, and start running main function
   args = parser.parse_args()

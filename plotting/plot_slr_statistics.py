@@ -12,15 +12,19 @@ from scipy.stats import norm
 import numpy as np
 import matplotlib.pyplot as plt 
 import matplotlib.ticker as mticker
+import matplotlib.cm as cm
+from tqdm import tqdm
 
 use_tex()
-fig = plt.figure(figsize=(8,5))
-ax = fig.subplots(1,2,sharey=True)
+fig  = plt.figure(figsize=(6,6))
+axes = fig.subplots(2,2,sharey=True,sharex=True)
 
 sims = sorted(glob("*/"))
-for i,sim in enumerate(sims):
-  print(sim)
-  color = list(mcolors.TABLEAU_COLORS)[i]
+
+cmaps = np.linspace(0,1,len(sims))
+
+for i,sim in tqdm(enumerate(sims)):
+  color = cm.get_cmap("GnBu")(cmaps[i])
   # Get filename yields
   yields_fname = sorted(glob(sim+"*yields*.zst"))[-1]
   # Read in yields
@@ -43,38 +47,49 @@ for i,sim in enumerate(sims):
   ratio_local_60fe_sne = ratio_local_60fe + ratio_sne_60fe
   ratio_global_60fe_sne = ratio_global_60fe + ratio_sne_60fe
 
-  x_g,y_g = calc_cdf(ratio_global_26al_sne)
-  x_l,y_l = calc_cdf(ratio_local_26al_sne)
-  ax[0].plot(x_g,y_g,c=color)
-  ax[0].plot(x_l,y_l,c=color,linestyle="dashed")
+  xgal,ygal = calc_cdf(ratio_global_26al_sne)
+  xgfe,ygfe = calc_cdf(ratio_global_60fe_sne)
+  xlal,ylal = calc_cdf(ratio_local_26al_sne)
+  xlfe,ylfe = calc_cdf(ratio_local_60fe_sne)
 
-  x_g,y_g = calc_cdf(ratio_global_60fe_sne)
-  x_l,y_l = calc_cdf(ratio_local_60fe_sne)
-  ax[1].plot(x_g,y_g,c=color)
-  ax[1].plot(x_l,y_l,c=color,linestyle="dashed")
+  axes[0,0].plot(xgal,ygal,c=color)
+  axes[0,1].plot(xgfe,ygfe,c=color)
+  axes[1,0].plot(xlal,ylal,c=color,linestyle="dashed")
+  axes[1,1].plot(xlfe,ylfe,c=color,linestyle="dashed")
 
-  print(max(ratio_global_60fe_sne))
-  print(max(ratio_local_60fe_sne))
-  print(max(ratio_global_60fe))
-  print(max(ratio_local_60fe))
-  # plt.semilogx(base_global[:-1], cumulative_global, c=color)
-  # plt.semilogx(base_local[:-1],cumulative_local,c=color,linestyle="dotted")
+for i in range(len(axes)):
+  for j in range(len(axes[0])):
+    axes[i,j].set_ylim(0,1)
+    axes[i,j].set_xscale("log")
+    axes[i,j].set_xlim(1e-9,1e-3)
+    axes[i,j].xaxis.set_minor_locator(mticker.LogLocator(numticks=999, subs="auto"))
+    axes[i,j].grid(True,which="both",linestyle=":",alpha=0.3)
 
-for a in ax:
-  a.set_ylim(0,1)
-  a.set_xscale("log")
-  a.xaxis.set_minor_locator(mticker.LogLocator(numticks=999, subs="auto"))
-  a.grid(True,which="both",linestyle=":",alpha=0.3)
+for i in range(len(axes)):
+  axes[i,0].set_ylabel("CDF")
+  axes[i,0].axvline(x=5.85e-5,c="k",linestyle="dotted")
+for i in range(len(axes)):
+  axes[i,1].axvline(x=1e-6,c="k",linestyle="dotted")
+
+axes[1,0].set_xlabel("$^{26}$Al/$^{27}$Al")
+axes[1,1].set_xlabel("$^{60}$Fe/$^{56}$Fe")
+
+axes[0,0].set_title("$^{26}$Al global model")
+axes[0,1].set_title("$^{60}$Fe global model")
+axes[1,0].set_title("$^{26}$Al local model")
+axes[1,1].set_title("$^{60}$Fe local model")
 
 
-ax[0].set_xlim(1e-10,1e-2)
-ax[0].axvline(x=5.85e-5,c="k",linestyle="dotted")
-ax[0].set_xlabel("$^{26}$Al/$^{27}$Al")
-ax[0].set_ylabel("CDF")
+# for axin axes:
+  # ax.set_ylim(0,1)
+  # ax.set_xscale("log")
 
-ax[1].set_xlim(1e-10,1e-4)
-ax[1].axvline(x=1e-6,c="k",linestyle="dotted")
-ax[1].set_xlabel("$^{60}$Fe/$^{56}$Fe")
+
+# axes[0].set_xlim(1e-10,1e-2)
+# axes[0].set_ylabel("CDF")
+
+# axes[1].set_xlim(1e-10,1e-4)
+# axes[1].axvline(x=1e-6,c="k",linestyle="dotted")
 
 plt.savefig("cdf.pdf",bbox_inches="tight")
 
