@@ -15,15 +15,19 @@ import matplotlib.ticker as mticker
 import matplotlib.cm as cm
 from tqdm import tqdm
 
+try:
+  outname = sys.argv[1]
+except:
+  outname = "cdf"
+
 use_tex()
 fig  = plt.figure(figsize=(6,6))
 axes = fig.subplots(2,2,sharey=True,sharex=True)
-
-sims = sorted(glob("*/"))
+sims = sorted(glob("./*/"))
 
 cmaps = np.linspace(0,1,len(sims))
 
-for i,sim in tqdm(enumerate(sims)):
+for i,sim in enumerate(tqdm(sims)):
   color = cm.get_cmap("GnBu")(cmaps[i])
   # Get filename yields
   yields_fname = sorted(glob(sim+"*yields*.zst"))[-1]
@@ -34,6 +38,7 @@ for i,sim in tqdm(enumerate(sims)):
   # Read in state, extract cluster data
   final_state = read_state(last_state_fname)
   cluster = final_state.cluster
+  nstars = len(cluster.mass)
   # Calculate ratios for 26Al
   ratio_local_26al = cluster.mass_26al_local / cluster.mass_27al
   ratio_global_26al = cluster.mass_26al_global / cluster.mass_27al
@@ -59,9 +64,13 @@ for i,sim in tqdm(enumerate(sims)):
 
 for i in range(len(axes)):
   for j in range(len(axes[0])):
-    axes[i,j].set_ylim(0,1)
     axes[i,j].set_xscale("log")
-    axes[i,j].set_xlim(1e-9,1e-3)
+
+    # axes[i,j].set_yscale("log")
+    # ymin = 10**(np.floor(np.log10(1/nstars)))
+
+    axes[i,j].set_ylim(0,1)
+    axes[i,j].set_xlim(1e-12,1e-2)
     axes[i,j].xaxis.set_minor_locator(mticker.LogLocator(numticks=999, subs="auto"))
     axes[i,j].grid(True,which="both",linestyle=":",alpha=0.3)
 
@@ -91,6 +100,6 @@ axes[1,1].set_title("$^{60}$Fe local model")
 # axes[1].set_xlim(1e-10,1e-4)
 # axes[1].axvline(x=1e-6,c="k",linestyle="dotted")
 
-plt.savefig("cdf.pdf",bbox_inches="tight")
+plt.savefig(outname+".pdf",bbox_inches="tight")
 
 # yields.ratio_al_local = yields.local_26al / 

@@ -26,8 +26,10 @@ from amuse.community.ph4 import Ph4
 import matplotlib.pyplot as plt
 import seaborn as sns
 # Math/Array libraries
+from random import uniform
 import numpy as np # Numpy library, what code isn't complete without it?
 import numba as nb # Numba JIT library, used for accelerating less performant parts of the code
+import pandas as pd # Pandas table library, used for some data handling
 from numpy.random import uniform, exponential # Random distributions for IMF 
 from math import exp, ceil, pi # Always useful
 from scipy.interpolate import splev,splrep,Akima1DInterpolator # Interpolation libraries for wind yield calculations
@@ -50,11 +52,11 @@ warnings.simplefilter('ignore', category=NumbaPendingDeprecationWarning)
 
 # GLOBAL VALUES
 n_plot           = 100 # Number of checkpoints to make
-steps_per_plot   = 10  # Number of substeps to make per write
+steps_per_plot   = 25  # Number of substeps to make per write
 module_directory = os.path.dirname(os.path.abspath(sys.argv[0]))
 workers          = 8
 ### MODELS
-gravity_model = "bhtree" # Currently using the Hermite model as it runs fine single threaded on M1
+gravity_model = "bhtree" 
 stellar_model = SeBa    # Using SeBa as it is fast and relatively accurate
 
 # Declare units in global namespace, using amuse units, this just saves a lot of time and space
@@ -74,6 +76,7 @@ kms    = units.kms      # Kilometers per second, 1.0e+6 cm/s
 # SIMULATION VALUES
 r_bub_local_wind = 0.1 | pc # Size of bubble interation region for wind 
 r_bub_local_sne  = 1.0 | pc # Size of bubble interaction region for supernovae
+AGBs = None
 
 # FILE HANDLING ROUTINES AND CLASSES
 
@@ -128,24 +131,39 @@ class Yields():
     ## 26Al
     self.filename          = filename
     self.time              = []
+    # 26al Masses assuming no disk progression
     self.local_26al        = []
     self.global_26al       = []
     self.sne_26al          = []
+    self.agb_26al          = []
+    self.agb_26al_raw      = []
+    # 26al Summations
     self.sum_local_26al    = []
     self.sum_global_26al   = []
     self.sum_sne_26al      = []
+    self.sum_agb_26al      = []
+    # 60fe Masses
     self.local_60fe        = []
     self.global_60fe       = []
     self.sne_60fe          = []
+    self.agb_60fe          = []
+    self.agb_60fe_raw      = []
+    # 60fe Summations
     self.sum_local_60fe    = []
     self.sum_global_60fe   = []
     self.sum_sne_60fe      = []
+    self.sum_agb_60fe      = []
+    # Final values assuming disk progression
+    # 26Al
     self.local_26al_final  = []
     self.global_26al_final = []
     self.sne_26al_final    = []
+    self.agb_26al_final    = []
+    # 60Fe
     self.local_60fe_final  = []
     self.global_60fe_final = []
     self.sne_60fe_final    = []
+    self.agb_60fe_final    = []
     self.first_write       = True
     return 
   def update_state(self,model_time,cluster):
@@ -162,25 +180,35 @@ class Yields():
     self.local_26al.append(list(cluster.mass_26al_local.value_in(msol)))
     self.global_26al.append(list(cluster.mass_26al_global.value_in(msol)))
     self.sne_26al.append(list(cluster.mass_26al_sne.value_in(msol)))
+    self.agb_26al.append(list(cluster.mass_26al_agb.value_in(msol)))
+    self.agb_26al_raw.append(list(cluster.mass_26al_agb_raw.value_in(msol)))
     # 26Al sums
     self.sum_local_26al.append(sum(list(cluster.mass_26al_local.value_in(msol))))
     self.sum_global_26al.append(sum(list(cluster.mass_26al_global.value_in(msol))))
     self.sum_sne_26al.append(sum(list(cluster.mass_26al_sne.value_in(msol))))
+    self.sum_agb_26al.append(sum(list(cluster.mass_26al_agb.value_in(msol))))
     # 60Fe Continuous values
     self.local_60fe.append(list(cluster.mass_60fe_local.value_in(msol)))
     self.global_60fe.append(list(cluster.mass_60fe_global.value_in(msol)))
     self.sne_60fe.append(list(cluster.mass_60fe_sne.value_in(msol)))
+    self.agb_60fe.append(list(cluster.mass_60fe_agb.value_in(msol)))
+    self.agb_60fe_raw.append(list(cluster.mass_60fe_agb_raw.value_in(msol)))
     # 60Fe sums
     self.sum_local_60fe.append(sum(list(cluster.mass_60fe_local.value_in(msol))))
     self.sum_global_60fe.append(sum(list(cluster.mass_60fe_global.value_in(msol))))
     self.sum_sne_60fe.append(sum(list(cluster.mass_60fe_sne.value_in(msol))))
+    self.sum_agb_60fe.append(sum(list(cluster.mass_60fe_agb.value_in(msol))))
     # Additionally, copy the current instance of the `final` yields
+    # 26Al
     self.local_26al_final  = list(cluster.mass_26al_local_final.value_in(msol))
     self.global_26al_final = list(cluster.mass_26al_global_final.value_in(msol))
     self.sne_26al_final    = list(cluster.mass_26al_sne_final.value_in(msol))
+    self.agb_26al_final    = list(cluster.mass_26al_agb_final.value_in(msol))
+    # 60Fe
     self.local_60fe_final  = list(cluster.mass_60fe_local_final.value_in(msol))
     self.global_60fe_final = list(cluster.mass_60fe_global_final.value_in(msol))
     self.sne_60fe_final    = list(cluster.mass_60fe_sne_final.value_in(msol))
+    self.agb_60fe_final    = list(cluster.mass_60fe_agb_final.value_in(msol))
     # You need to write something to this to fix edge case where disk has not decayed, this should be doable
 
     # Write CSV header first, this is written in such a way that restoring the yields object should not cause this to rewrite
@@ -421,6 +449,9 @@ def calc_slr_yield(mass,masses,yields):
     masses: masses in SLR class
     yields: yields in SLR class
   """
+
+  # print(masses)
+
   mass_msol   = mass.value_in(msol)   # Convert star mass to float in solar mass
   masses_msol = masses.value_in(msol) # Convert masses to floats in solar masses
   yields_msol = yields.value_in(msol) # Convert yields to floats in solar masses
@@ -448,7 +479,6 @@ def calc_total_mass_loss(mass,z=0.02):
   """
   approx_lifespan = ((1e10 | yr) * ((1 | msol) / mass)**2.5) # Estimate the lifespan of the star
   simulation_time = 2.0 * approx_lifespan # Add some wiggle room
-  # print(approx_lifespan.value_in(myr))
   evol = SeBa(number_of_workers=1) # Initialise stellar evolution code
   evol.parameters.metallicity = z # Set metallicity
   evol.particles.add_particle(Particle(mass=mass)) # Add a single star to code
@@ -467,6 +497,77 @@ def calc_SLR_mass_loss(mass_loss_rate,wind_ratio):
   Calculate the wind mass loss rate from the
   """
   return mass_loss_rate * wind_ratio
+
+def read_AGBs():
+  class AGB:
+    def __init__(self,filename) -> None:
+      """
+      Initialise, read in data, add to datatypes
+      """
+      # Read in data
+      data = pd.read_csv(filename)
+      self.data = data
+      # First, get data
+      for column in list(data.columns):
+        setattr(self,column,data[column].to_numpy())
+      # Then convert data to amuse units
+      for key in self.__dict__.keys():
+        if key == "t":
+          setattr(self,key,getattr(self,key) | myr)
+        if key == "star_mass":
+          setattr(self,key,getattr(self,key) | msol)
+        if "mass_loss_rate" in key:
+          setattr(self,key,getattr(self,key) | msolyr)
+        if "total_mass_loss" in key:
+          setattr(self,key,getattr(self,key) | msol)
+  
+      self.t_f = self.t[-1]
+
+      # Determine mass from filename (only number should be AGB mass in solar masses)
+      filename_rel   = filename.split("/")[-1]
+      filename_under = filename_rel.split("_")
+      for check in filename_under:
+        try:
+          self.mass = float(check) | msol
+        except:
+          pass
+
+    def interp_value(self,quantity,time):
+      t = self.t.value_in(myr)
+      time_myr = time.value_in(myr)
+      y = getattr(self,quantity)
+      units = y.unit
+      # Skip values if time out of range, assume zero and return
+      if time_myr < t[0]: 
+        return 0.0 | units
+      if time_myr > t[-1]:
+        return 0.0 | units
+      # # Some cubic splines can misbehave if 
+      # if y.max() / y.min() >= 100:
+      #   uselog = True
+      # else:
+      #   uselog = False
+      # break into base units, otherwise things get weird
+      y = y.value_in(units)
+      # If using log scale, convert values
+      # if uselog:
+      #   y = np.log10(y)
+      interp = Akima1DInterpolator(t,y)
+      yy = interp(time_myr)
+      # print(yy)
+      # Convert log space result back to linear
+      # if uselog:
+      #   yy = float(10.0**yy)
+      yy = yy | units
+      return yy
+  
+  filenames = glob(module_directory+"/agb_wind/agb_slr*.csv")
+  AGBs = []
+  for filename in filenames:
+    AGBs.append(AGB(filename))
+  return AGBs
+
+
 
 def read_SLRs(filename):
   """
@@ -500,7 +601,7 @@ def read_SLRs(filename):
       SLRs[slr_name] = slr_line
   
   # read_yield("limongi-chieffi-2018/wind-yields.csv")
-  print(module_directory)
+  # print(module_directory)
 
   try:
     with open(module_directory+"/limongi-chieffi-2018/wind-yields.csv") as f:
@@ -600,7 +701,7 @@ def calc_wind_abs(lm_id_arr,hm_id_arr,
       wind_abs_arr[lm] += wind_abs
   return wind_abs_arr
 
-def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,bar,save):
+def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,bar,save,AGB=None):
   """
   Evolve simulation with an adaptive timestep
 
@@ -664,6 +765,13 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
   t_start_init = time()
   # Generate a list of indices for high mass and low mass stars
   hm_id,lm_id = get_high_mass_star_indices(cluster)
+
+  # Get current cluster half-mass radius
+  virial_radius = cluster.virial_radius()
+  # bar.write("Cluster virial radius = {:.2f}".format(virial_radius.value_in(pc)))
+  # half_mass_radius = calc_cluster_half_mass(cluster) | pc
+  # bar.write("half_mass_radius = {:.2f}".format(half_mass_radius.value_in(pc)))
+
   # If all stars have gone supernovae, or gone below high mass threshold, immediately end simulation
   # if len(hm_id) == 0:
   #   bar.write("!!! NO HIGH MASS STARS REMAINING, FINISHING SIMULATION !!!")
@@ -676,6 +784,12 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
   t_fin_init = time()
   # Calculate timestep, previously we used a variable timestep, but it was extremely slow for some reason
   dt = t_f / (n_plot * steps_per_plot)
+
+  # Use adaptive timestep if turned on
+  # Calculate the timestep if adaptive timestep enabled
+  # if metadata.args.adaptive_timestep:
+  #   calc_adaptive_timestep(cluster,hm_id,lm_id,dt,has_interloper=metadata.args.interloper)
+
   t_new = t + dt
 
   if metadata.args.verbose:
@@ -712,13 +826,12 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
 
   ### N-BODY ROUTINES
   # Now, evolve the N-body simulation (most time consuming section of iteration)
-
-
   t_start_grav = time()
   gravity.evolve_model(t_new)
   t_fin_grav = time()
   if metadata.args.verbose:
     bar.write("t = {:.3f} Myr: Finished N-body, took {:.3f} sec".format(t_new.value_in(myr),t_fin_grav - t_start_grav))
+
 
   ### STELLAR EVOLUTION ROUTINES
   # First, evolve stars according to SEBA model
@@ -786,7 +899,7 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
                                         wind_ratio_26al_arr,
                                         rdisk_arr,
                                         distance_limit = 0.0,
-                                        bubble_radius = 2 * Rc.value_in(units.km),
+                                        bubble_radius = virial_radius.value_in(units.km),
                                         dt = dt.value_in(units.s)) | kg
     wind_abs_global_60fe = calc_wind_abs(lm_id,hm_id,
                                         x_arr,y_arr,z_arr,
@@ -795,7 +908,7 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
                                         wind_ratio_60fe_arr,
                                         rdisk_arr,
                                         distance_limit = 0.0,
-                                        bubble_radius = 2 * Rc.value_in(units.km),
+                                        bubble_radius = virial_radius.value_in(units.km),
                                         dt = dt.value_in(units.s)) | kg
     # Now calculate wind absorption from Local model
     wind_abs_local_26al = calc_wind_abs(lm_id,hm_id,
@@ -840,16 +953,59 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
           # Now check each star to deposit SLRs
           for j in lm_id:
             d = calc_star_distance(gravity.particles[i],gravity.particles[j])
-            if d < r_bub_local_sne:
-              r_disk   = cluster[j].r_disk
-              eta_disk = calc_eta_disk_sne(r_disk,d)
-              al26_inj = al26_sn * eta_disk
-              fe60_inj = fe60_sn * eta_disk
-              # Store as appropriate
-              cluster[j].mass_26al_sne += al26_inj
-              cluster[j].mass_60fe_sne += fe60_inj
+            # if d < r_bub_local_sne: # Used to be that there was a bubble size for SNe, there isn't anymore
+            r_disk   = cluster[j].r_disk
+            eta_disk = calc_eta_disk_sne(r_disk,d)
+            al26_inj = al26_sn * eta_disk
+            fe60_inj = fe60_sn * eta_disk
+            # Store as appropriate
+            cluster[j].mass_26al_sne += al26_inj
+            cluster[j].mass_60fe_sne += fe60_inj
           # Enable kick flag, to ensure this doesn't repeat in the next iteration
           cluster[i].kicked = True
+
+  ### INTERLOPER ROUTINES
+  # Handle injection of SLRs from interloper
+  t_start_interloper = time()
+  if metadata.args.interloper:
+    # Quick check to find the interloper, it __should__ be the last item in the list, if it isn't, search for it
+    if cluster[-1].is_interloper == True: interloper = cluster[-1]
+    else:
+      interlopers = cluster[cluster.is_interloper == True]
+      if len(interlopers) > 1:
+        raise ValueError("More than 1 interloper found! That's not supposed to happen!")
+      else:
+        interloper = interlopers[0]
+    int_x,int_y,int_z = interloper.x,interloper.y,interloper.z
+    time_offset = metadata.args.interloper_offset_time
+    interloper_bubble_radius = metadata.args.interloper_bubble_radius
+    interloper_time = t - time_offset
+    if interloper_time > 0.0 | myr:
+      interloper_26al_rate = AGB.interp_value("26al_mass_loss_rate",interloper_time)
+      interloper_60fe_rate = AGB.interp_value("60fe_mass_loss_rate",interloper_time)
+      if interloper_26al_rate > 0.0 | msolyr or interloper_60fe_rate > 0.0 | msolyr:
+        for i in lm_id:
+          if cluster[i].is_interloper == False:
+            # if cluster[i].disk_alive == True:
+            lm_x,lm_y,lm_z    = cluster[i].x,cluster[i].y,cluster[i].z
+            lm_vx,lm_vy,lm_vz = cluster[i].vx,cluster[i].vy,cluster[i].vz
+            r_disk = cluster[i].r_disk
+            d_sep = ((lm_x - int_x)**2 + (lm_y - int_y)**2 + (lm_z - int_z)**2)**0.5
+            if d_sep < 0.1 | pc:
+              # Calculate disk speed
+              disk_spd = (lm_vx**2 + lm_vy**2 + lm_vz**2)**0.5
+              d_disk_trav = disk_spd * dt
+              eta_bub  = 0.75 * (r_disk**2) * d_disk_trav / (interloper_bubble_radius ** 3)
+              inter_abs_26al = interloper_26al_rate * eta_bub * dt
+              inter_abs_60fe = interloper_60fe_rate * eta_bub * dt
+              cluster[i].mass_26al_agb += inter_abs_26al
+              cluster[i].mass_60fe_agb += inter_abs_60fe
+              cluster[i].mass_26al_agb_raw += inter_abs_26al
+              cluster[i].mass_60fe_agb_raw += inter_abs_60fe
+  t_fin_interloper = time()
+  if metadata.args.verbose:
+    bar.write("t = {:.3f} Myr: Finished interloper, took {:.3f} sec".format(t_new.value_in(myr),
+                                                                            t_fin_interloper - t_start_interloper))
 
   ### DECAY ROUTINES
   # Progressively remove SLRs from disks through radioactive decay
@@ -867,6 +1023,11 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
   cluster.mass_60fe_local  *= decay_frac_60fe
   cluster.mass_60fe_global *= decay_frac_60fe
   cluster.mass_60fe_sne    *= decay_frac_60fe
+  # For interloper
+  if metadata.args.interloper:
+    cluster.mass_26al_agb    *= decay_frac_26al
+    cluster.mass_60fe_agb    *= decay_frac_60fe
+
   t_fin_decay = time()
   if metadata.args.verbose:
     bar.write("t = {:.3f} Myr: Finished decay, took {:.3f} sec".format(t_new.value_in(myr),t_fin_decay - t_start_decay))
@@ -874,15 +1035,19 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
   ### CONDENSE ROUTINES
   for i in lm_id:
     if cluster[i].disk_alive == True:
-      if cluster[i].tau_disk <= t_new:
+      if cluster[i].tau_disk >= t_new:
         cluster[i].mass_26al_local_final  = cluster[i].mass_26al_local
         cluster[i].mass_26al_global_final = cluster[i].mass_26al_global
         cluster[i].mass_26al_sne_final    = cluster[i].mass_26al_sne
         cluster[i].mass_60fe_local_final  = cluster[i].mass_60fe_local
         cluster[i].mass_60fe_global_final = cluster[i].mass_60fe_global
         cluster[i].mass_60fe_sne_final    = cluster[i].mass_60fe_sne
-        if metadata.args.verbose:
-          bar.write("Disk of low-mass star #{} has condensed".format(i))
+        if metadata.args.interloper:
+          cluster[i].mass_26al_agb_final = cluster[i].mass_26al_agb
+          cluster[i].mass_60fe_agb_final = cluster[i].mass_60fe_agb
+      if cluster[i].tau_disk < t_new:
+        # if metadata.args.verbose:
+        bar.write("Disk of low-mass star #{} has condensed".format(i))
         cluster[i].disk_alive = False
   
   ### HOUSEKEEPING ROUTINES
@@ -912,6 +1077,47 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
   # Finish simulation and return, if finish = False, then this will be run again inside a loop in
   return cluster,gravity,stellar,yields,metadata,finish,bar
 
+
+@nb.njit(parallel=True)
+def calc_min_intercept_time(x,y,z,vx,vy,vz,lm_id,hm_id):
+  nlm,nhm = len(lm_id),len(hm_id)
+  int2_arr = np.zeros(nlm*nhm) # Array to store intercept time results^2 (seconds^2)
+  spd2_arr = np.zeros(nhm)     # Array to store interception candidate speeds^2 (km^2/s^2)
+  for i in range(nhm):
+    hm = hm_id[i]
+    vx1,vy1,vz1 = vx[hm],vy[hm],vz[hm] # Get values of velocities
+    spd2 = vx1**2 + vy1**2 + vz1**2 # Calculate
+    print(i,spd2**0.5)
+    spd2_arr[i] = spd2
+  for i in nb.prange(nlm):
+    lm = lm_id[i]
+    for j in range(nhm):
+      hm = hm_id[j]
+      ij = i + (j*nlm)
+      x1,y1,z1 = x[lm],y[lm],z[lm]
+      x2,y2,z2 = x[hm],y[hm],z[hm]
+      spd2 = spd2_arr[j]
+      d2 = (x1-x2)**2 + (y1-y2)**2 + (z1-z2)**2
+      int2_arr[ij] = d2 / spd2
+  int_t_min = np.min(int2_arr) ** 0.5
+  return int_t_min
+def calc_adaptive_timestep(cluster,hm_id,lm_id,dt,has_interloper = False):
+  if has_interloper:
+    interloper_id = -1
+    hm_id.append(interloper_id)
+  x  = cluster.x.value_in(units.km)
+  y  = cluster.y.value_in(units.km)
+  z  = cluster.z.value_in(units.km)
+  vx = cluster.vx.value_in(units.kms)
+  vy = cluster.vy.value_in(units.kms)
+  vz = cluster.vz.value_in(units.kms)
+  int_t_min  = calc_min_intercept_time(x,y,z,vx,vy,vz,lm_id,hm_id) | units.s
+  print(dt.value_in(myr))
+  print(int_t_min.value_in(myr))
+  n_substeps = ceil((dt / int_t_min) * 1)
+  print(n_substeps)
+  sys.exit()
+
 def get_high_mass_star_indices(cluster):
   """
   Rather than creating subsets of data, which use a lot of memory and have synchronisation issues
@@ -931,7 +1137,8 @@ def get_high_mass_star_indices(cluster):
   for i,star in enumerate(cluster):
     if star.mass >= 13.0 | msol:
       hm_id.append(i)
-    if star.mass <= 3.0 | msol:
+    if star.mass >= 0.1 | msol and star.mass <= 3.0 | msol:
+      # if star.disk_alive == True: # TEST PATCH
       lm_id.append(i)
   return hm_id,lm_id
 
@@ -939,9 +1146,7 @@ def disk_lifetime():
   """
   Calcualting a disk lifetime, we assume a mean disk lifetime of 5Myr, with an exponential 
   distribution to calculate the decay time.
-  Calculating the decay time ahead of the simulation - effectively predetermining the fate of the
-  disk - has a number of dire philosophical connotations, but is probably fine for an N-body
-  simulation.
+  Calculating the decay time ahead of the simulation - effectively predetermining the fate of the disk - has a number of dire philosophical connotations, but is probably fine for an N-body simulation.
 
   This is based off of estimated lifetimes from:
     Richert, A. J. W., Getman, K. V., Feigelson, E. D., Kuhn, M. A., Broos, P. S., Povich, M. S.,
@@ -950,7 +1155,10 @@ def disk_lifetime():
     Monthly Notices of the Royal Astronomical Society, 477, 5191–5206.
     https://doi.org/10.1093/mnras/sty949 
   """
-  lam = 5.0 # Scale height, mean lifetime of 5Myr
+  
+  # Quick modification to this, see Circumstellar disc lifetimes in numerous galactic young stellar clusters, Richert et al. 2018
+  lam = 2.885 # Scale height, mean lifetime of 2.885 myr, corresponds to t1/2 of 2myrs 
+
   tau = exponential(lam) | myr
   return tau
 
@@ -1052,6 +1260,35 @@ def calc_eta_disk_sne(r,d):
   eta_total = eta_cond * eta_inj * eta_geom
   return eta_total
 
+@nb.njit()
+def half_mass_calc_numba(d2_index_sort,d2,masses,cluster_mhalf):
+  mass_counter = 0.0
+  for i in d2_index_sort:
+    mass = masses[i]
+    mass_counter += mass
+    if mass_counter >= cluster_mhalf:
+      half_mass_radius = d2[i]**0.5
+      break
+  return half_mass_radius
+def calc_cluster_half_mass(cluster):
+  """
+  Calculate half mass radius of a cluster in parsecs (returned as float, not amuse units)
+  """
+  from amuse.datamodel import Particles
+  # First, find the barycentre, as this may not necessarily be (0,0,0)
+  bary = cluster.center_of_mass()
+  masses = cluster.mass.value_in(msol)
+  # Now calculate the half mass of the cluster
+  cluster_mhalf = (cluster.mass.sum()/2.).value_in(msol)
+  # Create a test particle at the barycentre for d2 calculations
+  test = Particles(1)
+  test.x,test.y,test.z = [bary[0]],[bary[1]],[bary[2]]
+  # Calculate d2 from AMUSE built in function
+  d2 = cluster.distances_squared(test)[:,0].value_in(pc*pc)
+  d2_index_sort = d2.argsort()
+  half_mass_radius = half_mass_calc_numba(d2_index_sort,d2,masses,cluster_mhalf)
+  return half_mass_radius
+
 def calc_star_distance(star1,star2):
   """
   Calculates distance between star 1 and star 2, uses amuse values so unit is flexible.
@@ -1062,78 +1299,121 @@ def calc_star_distance(star1,star2):
   d = np.sqrt((x2-x1)**2 + (y2-y1)**2 + (z2-z1)**2)
   return d
 
-def generate_masses(nstars):
+@nb.njit
+def maschberger(m,G_lower,G_upper):
+  """
+  Calculate Maschberger probability function for given auxiliary functions and masses
+  """
+  mu = 0.2 # Average star mass
+  a  = 2.3 # Low mass component
+  b  = 1.4 # High mass component
+  A = (((1-a) * (1-b))/mu) * (1/(G_upper-G_lower))
+  p = A * ((m / mu)**(-a)) * ((1 + (m/mu)**(1-a))**(-b))
+  return p
+
+def maschberger_aux(m):
+  """
+  Auxiliary function for Maschberger distribution for a given mass
+  """
+  mu = 0.2 # Average star mass
+  a  = 2.3 # Low mass component
+  b  = 1.4 # High mass component
+  return (1 + ((m/mu)**(1-a)))**(1-b)
+
+@nb.njit
+def gen_mass_numba(G_lower,G_upper,pm_lower,pm_upper,min_mass,max_mass,nstars):
+  """
+  Generate an array of star masses along the Maschberger distribution
+  Setup done in generate_masses()
+  """
+  masses = np.zeros(nstars)
+  i = 0
+  while i < nstars:
+    m = np.random.uniform(min_mass,max_mass)
+    pm = np.random.uniform(pm_lower,pm_upper)
+    if pm < maschberger(m,G_lower,G_upper):
+      masses[i] = m
+      i += 1
+  return masses
+
+def generate_masses(nstars,
+                    min_mass=0.01,max_mass=150.,m_lower=0.01,m_upper=150.,
+                    no_massive_star_requirement=False):
   """
   Generate a series of masses for stars using the Maschberger IMF, ensures that at least 1 massive star is included
   """
 
-  @nb.njit
-  def maschberger(m,G_lower,G_upper):
-    mu = 0.2 # Average star mass
-    a  = 2.3 # Low mass component
-    b  = 1.4 # High mass component
-    A = (((1-a) * (1-b))/mu) * (1/(G_upper-G_lower))
-    p = A * ((m / mu)**(-a)) * ((1 + (m/mu)**(1-a))**(-b))
-    return p
-
-  def maschberger_aux(m):
-    mu = 0.2 # Average star mass
-    a  = 2.3 # Low mass component
-    b  = 1.4 # High mass component
-    return (1 + ((m/mu)**(1-a)))**(1-b)
-  
-  @nb.njit
-  def gen_mass(G_lower,G_upper,pm_lower,pm_upper,min_mass,max_mass,nstars):
-    masses = np.zeros(nstars)
-    i = 0
-    while i < nstars:
-      m = np.random.uniform(min_mass,max_mass)
-      pm = np.random.uniform(pm_lower,pm_upper)
-      if pm < maschberger(m,G_lower,G_upper):
-        masses[i] = m
-        i += 1
-    return masses
-
-  m_lower  = 0.01
-  m_upper  = 60
   G_lower  = maschberger_aux(m_lower)
   G_upper  = maschberger_aux(m_upper)
   pm_upper = maschberger(m_lower,G_lower,G_upper)
   pm_lower = maschberger(m_upper,G_lower,G_upper)
   masses   = []
 
-  min_mass = 0.1  # Limit to red dwarfs
-  max_mass = 120. # No supermassive stars 
-
-  # Generate mass distribution 
-  # with tqdm(total=nstars) as bar:
-  #   while len(masses) < nstars:
-  #     m  = uniform(min_mass,max_mass)
-  #     pm = uniform(pm_lower,pm_upper)
-  #     if pm < maschberger(m,G_lower,G_upper):
-  #       masses.append(m)
-  #       bar.update(1)
-  #       if m >= 13.0:
-  #         bar.write("Star of mass {:.2f} Msol generated".format(m))
-  # bar.close()
-  # Check to see if a high mass star is present
-
   print("Sampling masses... ",end="")
-  masses = gen_mass(G_lower,G_upper,pm_lower,pm_upper,min_mass,max_mass,nstars)
-  if max(masses) < 13.0:
-    print("No massive stars in cluster! Re-rolling!")
-    masses = generate_masses(nstars)
-  else:
-    ii = 0
-    for i,mass in enumerate(masses):
-      if mass > 13.0:
-        ii += 1
-    print("Finished! {} massive stars generated".format(ii))
+  masses = gen_mass_numba(G_lower,G_upper,pm_lower,pm_upper,min_mass,max_mass,nstars)
+  if no_massive_star_requirement == False:
+    if max(masses) < 13.0:
+      print("No massive stars in cluster! Re-rolling!")
+      masses = generate_masses(nstars)
+
+  ii,iii = 0,0
+  for i,mass in enumerate(masses):
+    if mass > 13.0:
+      ii += 1
+    if mass >= 0.1 and mass <= 3.0:
+      iii += 1
+  print("Finished! {} massive stars and {} disk-bearing stars generated".format(ii,iii))
   # Convert list into array
   masses = np.asarray(masses)
   return masses
 
-def init_cluster(model, nstars, Rc, SLRs, nmass=3):
+def spawn_interloper(cluster,interloper_mass,closest_approach_radius,interloper_velocity,time_offset,Rc):
+  """
+  Add an additional, evolved AGB star to the simulation on a collision course with the star forming
+  region.
+
+  Interloper is placed at the position (-2rc,ro,0) in the simulation, where rc is the star forming region radius and ro is the offset radius
+
+  This function adds the following properties to the cluster system:
+  - is_interloper: Boolean for whether a star is the interloper or not
+  The remainder of the handling for the interloper is governed separately
+  
+  Inputs:
+    - cluster: Simulation cluster system
+    - stellar: Stellar evolution system
+    - gravity: N-body system
+    - interloper_mass: Mass of AGB star (Msol)
+    - closest_approach: Closest approach distance of interloper (pc)
+
+  Outputs:
+    - cluster: Input cluster system with interloper appended
+    - stellar: Input stellar evolution system with interloper appended
+    - gravity: Input N-body system with interloper appended
+
+  References:
+    Parker, R. J., & Schoettler, C. (2023). Isotopic Enrichment of Planetary Systems from Asymptotic Giant Branch Stars. The Astrophysical Journal Letters, 952(1), L16. https://doi.org/10.3847/2041-8213/ace24a
+  """
+  converter  = nbody_system.nbody_to_si(Rc,interloper_mass)
+  interloper = plummer.new_plummer_model(1, converter)
+  # Write mass
+  interloper[0].mass = interloper_mass
+  # Write positions
+  interloper[0].x = - 2 * Rc
+  interloper[0].y = closest_approach_radius 
+  interloper[0].z = 0.0 | pc
+  # Write velocities
+  interloper[0].vx = interloper_velocity
+  interloper[0].vy = 0.0 | kms
+  interloper[0].vz = 0.0 | kms
+  interloper[0].is_interloper = True
+  interloper[0].age = 1 | myr
+  cluster.add_particles(interloper)
+  # print(cluster)
+  return cluster
+
+def init_cluster(model, nstars, Rc, SLRs,
+                 no_massive_star_requirement=False,
+                 r_disk=100.):
   """
   Initialise cluster
   Input:
@@ -1146,10 +1426,10 @@ def init_cluster(model, nstars, Rc, SLRs, nmass=3):
   """
 
   # First, generate a series of masses
-  masses = generate_masses(nstars)
+  masses = generate_masses(nstars,
+                           no_massive_star_requirement=no_massive_star_requirement)
   # Set basic simulation parameters
   Mcluster  = sum(masses) | msol
-
   # Now create the cluster
   print("Generating cluster...")
   masses    = masses | msol # Convert to AMUSE units
@@ -1176,6 +1456,7 @@ def init_cluster(model, nstars, Rc, SLRs, nmass=3):
   # As such each value is now its own parameter, which does complicate things!
 
   # Step 1: Calculate star properties that are mass dependent, these can't be vectorised as particles
+
   for star in cluster:
     # Star properties
     star.radius = 0. | au # Stars are dimensionless
@@ -1183,27 +1464,37 @@ def init_cluster(model, nstars, Rc, SLRs, nmass=3):
     # Protoplanetary disk properties
     star.m_disk_gas  = 0.1 * star.mass
     star.m_disk_dust = 0.01 * star.m_disk_gas
-    star.r_disk      = 100.0 | au # Stars have a common initial disk size
+    star.r_disk      = r_disk | au # Stars have a common initial disk size
     star.tau_disk    = disk_lifetime() # Calculate disk lifetime from random sample distribution
     # SLR properties
     ## Aluminium group
+    # NB: stable isotope masses calculated from star mass not dust mass, this produces the same value
+    #     but looks different to how presented in my paper and all other papers, specifically 
+    #     Parker et al. 2023, I've tripped myself up like ~twice~ thrice now thinking that I made a typo here
+    #     again, it is the _same value, just represented differently_
     star.mass_27al = 8.500e-6 * star.mass # Calculate stable Al mass from Chrondritic samples
-    star.mass_26al_local  = 0.0 | kg
-    star.mass_26al_global = 0.0 | kg
-    star.mass_26al_sne    = 0.0 | kg
+    star.mass_26al_local   = 0.0 | kg
+    star.mass_26al_global  = 0.0 | kg
+    star.mass_26al_sne     = 0.0 | kg
+    star.mass_26al_agb     = 0.0 | kg
+    star.mass_26al_agb_raw = 0.0 | kg # Special raw value where no disk progression or radio decay is done
     # Final masses of aluminium
     star.mass_26al_local_final  = 0.0 | kg
     star.mass_26al_global_final = 0.0 | kg
     star.mass_26al_sne_final    = 0.0 | kg
+    star.mass_26al_agb_final    = 0.0 | kg
     ## Iron group
     star.mass_56fe = 1.828e-4 * star.mass # Claculate stable Fe mass from Chrondritic samples
-    star.mass_60fe_local  = 0.0 | kg
-    star.mass_60fe_global = 0.0 | kg
-    star.mass_60fe_sne    = 0.0 | kg
+    star.mass_60fe_local   = 0.0 | kg
+    star.mass_60fe_global  = 0.0 | kg
+    star.mass_60fe_sne     = 0.0 | kg
+    star.mass_60fe_agb     = 0.0 | kg
+    star.mass_60fe_agb_raw = 0.0 | kg # Special raw value where no disk progression or radio decay is done
     # Final masses of iron
     star.mass_60fe_local_final  = 0.0 | kg
     star.mass_60fe_global_final = 0.0 | kg
     star.mass_60fe_sne_final    = 0.0 | kg
+    star.mass_60fe_agb_final    = 0.0 | kg
     # Mass dependent based on bracketing (if a star is massive or not)
     ## High mass group, stars greater than 13 solar masses (minimum value in Limongi & Cheiffi)
 
@@ -1228,13 +1519,14 @@ def init_cluster(model, nstars, Rc, SLRs, nmass=3):
       star.sn_yield_60fe = calc_slr_yield(star.mass,
                                           SLRs["Fe60"].sne_mass,
                                           SLRs["Fe60"].sne_yield) # 60Fe yield
-    if star.mass <= 3.0 | msol:
+    if star.mass >= 0.1 | msol and star.mass <= 3.0 | msol:
       star.disk_alive = True
       star.total_wind_loss = 0.0 | msol # Mass loss for low mass stellar winds can be neglected
 
 
   # Finish up and return cluster
   print("Cluster done!")
+  # print(cluster)
   return cluster,converter
 
 def main(args):
@@ -1267,7 +1559,9 @@ def main(args):
   # Initialise star cluster and star masses, or load from disk
 
   if args.reload == "":
-    cluster,converter = init_cluster("plummer",nstars,Rc,SLRs)
+    cluster,converter = init_cluster("plummer",nstars,Rc,SLRs,
+                                     no_massive_star_requirement=args.no_massive_star_requirement,
+                                     r_disk = args.disk_radius)
     used_checkpoint = False
   else:
     print("! Loading from file {}...".format(args.reload))
@@ -1280,8 +1574,50 @@ def main(args):
     metadata.update_access_time() # Inform metadata has been accessed
     used_checkpoint = True
 
-  # Initialise N-Body simulation
+  AGB = None
+  if args.interloper:
+    if args.reload == "":
+      # Convert interloper mass
+      args.interloper_mass = args.interloper_mass | msol
+      # Convert interloper bubble size
+      args.interloper_bubble_radius = args.interloper_bubble_radius | pc
+      # Convert interloper offset radius
+      if args.interloper_radius == None:
+        args.interloper_radius = uniform(0.0,args.rc)
+      args.interloper_radius = args.interloper_radius | pc
+      # Convert interloper velocity
+      if args.interloper_velocity == None:
+        args.interloper_velocity = uniform(0.0,100.0)
+      args.interloper_velocity = args.interloper_velocity | kms
+      # Manage offset time
+      args.interloper_offset_time = args.interloper_offset_time | myr
+      # Add interloper to cluster
+      print("!!! Spawning an interloper with properties: !!!")
+      print("  > Mass:          {:.1f} Msol".format(args.interloper_mass.value_in(msol)))
+      print("  > Bubble radius: {:.3f} pc".format(args.interloper_bubble_radius.value_in(pc)))
+      print("  > Approach:      {:.3f} pc".format(args.interloper_radius.value_in(pc)))
+      print("  > Velocity:      {:.3f} km/s".format(args.interloper_velocity.value_in(kms)))
+      print("  > Offset:        {:.3f} Myr".format(args.interloper_offset_time.value_in(myr)))
 
+      # Read AGBs, bad code incoming
+      AGBs = read_AGBs()
+      for AGB_candidate in AGBs:
+        if args.interloper_mass == AGB_candidate.mass:
+          AGB = AGB_candidate
+      if AGB == None:
+        validmasses = []
+        for AGB in AGBs:
+          validmasses.append(AGB.mass.value_in(msol))
+        raise ValueError("NO VALID INTERLOPER MASS, MUST BE {} MSOL".format(validmasses))
+      # Finishing checks and balances, adding an interloper to the cluster
+      cluster = spawn_interloper(cluster,
+                                 args.interloper_mass,
+                                 args.interloper_radius,
+                                 args.interloper_velocity,
+                                 args.interloper_offset_time,
+                                 Rc)
+
+  # Initialise N-Body simulation
   if gravity_model == "hermite":
     from amuse.lab import Hermite
     gravity = Hermite(converter,number_of_workers=workers)
@@ -1296,11 +1632,16 @@ def main(args):
     gravity = Hermite(converter,number_of_workers=workers,mode="GPU")
   else:
     raise ValueError("Invalid N body solver selection!")
+  
+  # print(cluster[-1])
+  # # print(cluster)
+  # sys.exit()
 
   gravity.particles.add_particles(cluster)
   # Initialise stellar evolution simulation
   stellar = stellar_model()
   stellar.particles.add_particles(cluster)
+
   # Quickly change model times to simulation time, otherwise time reset every reload
   if used_checkpoint == True:
     # Change simulation times
@@ -1321,13 +1662,15 @@ def main(args):
   finish = False
   save   = False
   n_iter = 0
+
   while finish == False:
     if n_iter % steps_per_plot == 0:
       save = True
     else:
       save = False
-    cluster,gravity,stellar,yields,metadata,finish,bar = evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,bar,save)
+    cluster,gravity,stellar,yields,metadata,finish,bar = evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,bar,save,AGB=AGB)
     n_iter += 1
+
   gravity.stop()
   stellar.stop()
   bar.close()
@@ -1342,7 +1685,35 @@ if __name__ == "__main__":
   parser.add_argument("-nc", "--n_checkpoint",type=int,default=None,help="Which checkpoint file to load, defaults to highest number")
   parser.add_argument("-m", "--model", type=str, default="plummer", help="Which model to use, defaults to Plummer sphere, can also use fractal model")
   parser.add_argument("-d","--fractal_dimension",type=float,default=2.0,help="Dimension parameter for fractal model")
-  parser.add_argument("-f","--filename",type=str,default="",help="Base name for files to SAVE, i.e. \"<filename>-yields.csv\", by default adopts the convention \"simulation-YY-MM-DD-HH-MM-SS\" based on sim start time") 
+  parser.add_argument("-rd","--disk_radius",
+                      type=float,default=100,
+                      help="Protoplanetary disk radius, typically 100 AU")
+  parser.add_argument("--adaptive_timestep",
+                      action="store_true",
+                      help="Use experimental adaptive timestep")
+  parser.add_argument("-f","--filename",type=str,default="",help="Base name for files to SAVE, i.e. \"<filename>-yields.csv\", by default adopts the convention \"simulation-YY-MM-DD-HH-MM-SS\" based on sim start time")
+  parser.add_argument("--no_massive_star_requirement",
+                      action="store_true",
+                      help="Do not require the formation of a massive star in the cluster (no re-rolls)")
+  # Arguments governing AGB interlopers
+  parser.add_argument("-i","--interloper",action="store_true",
+                      help="Throw an interloping AGB star into the simulation")
+  parser.add_argument("-mi","--interloper_mass",
+                      type=float,default=3.0,
+                      help="Mass of the interloping star, needs to be a valid mass")
+  parser.add_argument("-rbi","--interloper_bubble_radius",
+                      type=float,default=0.1,
+                      help="Bubble size of interloping stars stellar wind, by default 0.1 pc")
+  parser.add_argument("-ri","--interloper_radius",
+                      type=float,default=None,
+                      help="Interloper closest approach radius from barycenter in parsecs, assuming perfectly straight path, by default a random value between 0 pc and the star-forming region radius")
+  parser.add_argument("-vi","--interloper_velocity",
+                      type=float,default=None,
+                      help="Interloper initial velocity towards the cluster in km/s, again assumes perfectly straight apth to the closest approach in a straight line, by default a random value between 1 and 100km/s")
+  parser.add_argument("-ti","--interloper_offset_time",
+                      type=float,default=0.0,
+                      help="Time until interloper enters AGB phase in Myr, by default this is zero, star enters AGB phase at the start of the simulation")
+
   parser.add_argument("-t_f","--final_time",type=float,default=10.0,help="Final time to simulate to in Myr")
   parser.add_argument("-v","--verbose",action="store_true",help="Print additional statements")
   # Finish parser, and start running main function

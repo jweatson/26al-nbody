@@ -5,7 +5,7 @@ sys.path.append(script_dir)
 sys.path.append(script_dir+"/../")
 
 from al26_plot import get_digit_from_filename,read_state,plot_positions
-from al26_nbody import State
+from al26_nbody import State,Metadata
 import matplotlib.pyplot as plt
 
 n = sys.argv[1]

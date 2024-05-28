@@ -101,7 +101,7 @@ def main():
     if name == "Al26":
       fit_params = fit.to_numpy()[3:]
       masses = np.linspace(minmass,maxmass,nstars) | msol
-      times  = np.linspace(0,10,1000) | myr
+      times  = np.linspace(0,10,10) | myr
       cols = mpl.cm.inferno(np.linspace(1,0,nstars)) # 1 to 0 as front to back, it's weird but trust me here
       # masses = 15.0 | msol
 
