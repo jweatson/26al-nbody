@@ -16,13 +16,27 @@ from al26_nbody import State,Metadata,Yields,myr,pc,msol,get_high_mass_star_indi
 import scipy
 from amuse.units import units
 from numba import njit,prange
+import pandas as pd
 
 
-def use_tex():
+def use_tex(use_mnras=False):
   plt.rcParams.update({
     "text.usetex": True,
     "font.family": "Computer Modern"
   })
+
+  if use_mnras == True:
+    import matplotlib.font_manager
+    SMALL_SIZE = 9
+    MEDIUM_SIZE = 9
+    BIGGER_SIZE = 9
+    matplotlib.font_manager.findSystemFonts(fontpaths=None, fontext='ttf')
+    plt.rc('axes',titlesize=SMALL_SIZE)     # fontsize of the axes title
+    plt.rc('axes',labelsize=MEDIUM_SIZE)    # fontsize of the x and y labels
+    plt.rc('xtick',labelsize=SMALL_SIZE)    # fontsize of the tick labels
+    plt.rc('ytick',labelsize=SMALL_SIZE)    # fontsize of the tick labels
+    plt.rc('legend',fontsize=SMALL_SIZE)    # legend fontsize
+    plt.rc('figure',titlesize=BIGGER_SIZE)
 
 def read_state(filename):
   """
@@ -48,6 +62,11 @@ def read_yields(filename):
       yields.__dict__[attr] = np.asarray(yields.__dict__[attr])
 
   return yields
+
+def read_interloper_trajectory(filename):
+  colnames=["sim_time","agb_time","x","y","z","bary_dist"]
+  int_traj = pd.read_csv(filename,names=colnames,header=None)
+  return int_traj
 
 @nb.njit(parallel=True)
 def check_interaction_truth_table(xh,yh,zh,xl_arr,yl_arr,zl_arr,r):
@@ -544,12 +563,6 @@ def calc_eta_disk_sne(r,d):
   # Calculate the whole thing
   eta_total = eta_cond * eta_inj * eta_geom
   return eta_total
-
-
-
-    
-
-
   
 
 

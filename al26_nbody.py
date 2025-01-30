@@ -49,10 +49,12 @@ from numba.core.errors import NumbaDeprecationWarning, NumbaPendingDeprecationWa
 import warnings
 warnings.simplefilter('ignore', category=NumbaDeprecationWarning)
 warnings.simplefilter('ignore', category=NumbaPendingDeprecationWarning)
+# Using scikit-spatial for line intersection things with interlopers
+from skspatial.objects import Line,Sphere
 
 # GLOBAL VALUES
 n_plot           = 100 # Number of checkpoints to make
-steps_per_plot   = 25  # Number of substeps to make per write
+steps_per_plot   = 10  # Number of substeps to make per write
 module_directory = os.path.dirname(os.path.abspath(sys.argv[0]))
 workers          = 8
 ### MODELS
@@ -827,11 +829,13 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
   ### N-BODY ROUTINES
   # Now, evolve the N-body simulation (most time consuming section of iteration)
   t_start_grav = time()
+  # Make a copy of previous position
+  gravity_prev = gravity.particles.copy()
+  # Evolve model
   gravity.evolve_model(t_new)
   t_fin_grav = time()
   if metadata.args.verbose:
     bar.write("t = {:.3f} Myr: Finished N-body, took {:.3f} sec".format(t_new.value_in(myr),t_fin_grav - t_start_grav))
-
 
   ### STELLAR EVOLUTION ROUTINES
   # First, evolve stars according to SEBA model
@@ -981,6 +985,7 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
     interloper_bubble_radius = metadata.args.interloper_bubble_radius
     interloper_time = t - time_offset
     if interloper_time > 0.0 | myr:
+      # bar.write("Interloper running this step!")
       interloper_26al_rate = AGB.interp_value("26al_mass_loss_rate",interloper_time)
       interloper_60fe_rate = AGB.interp_value("60fe_mass_loss_rate",interloper_time)
       if interloper_26al_rate > 0.0 | msolyr or interloper_60fe_rate > 0.0 | msolyr:
@@ -988,13 +993,34 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
           if cluster[i].is_interloper == False:
             # if cluster[i].disk_alive == True:
             lm_x,lm_y,lm_z    = cluster[i].x,cluster[i].y,cluster[i].z
-            lm_vx,lm_vy,lm_vz = cluster[i].vx,cluster[i].vy,cluster[i].vz
+            # lm_vx,lm_vy,lm_vz = cluster[i].vx,cluster[i].vy,cluster[i].vz
             r_disk = cluster[i].r_disk
-            d_sep = ((lm_x - int_x)**2 + (lm_y - int_y)**2 + (lm_z - int_z)**2)**0.5
-            if d_sep < 0.1 | pc:
+            int_x_o,int_y_o,int_z_o = gravity_prev[-1].x,gravity_prev[-1].y,gravity_prev[-1].z
+            lm_x_o,lm_y_o,lm_z_o    = gravity_prev[i].x,gravity_prev[i].y,gravity_prev[i].z
+
+            # Calculate the fraction of the timestep that the interloper and disk pass within 0.1 pc of each other
+            # This is used as this can account for near misses, the fraction can then be used to derive a more accurate path distance
+            intersection_frac = calc_intersection(int_x_o.value_in(pc),
+                                                  int_y_o.value_in(pc),
+                                                  int_z_o.value_in(pc),
+                                                  int_x.value_in(pc),
+                                                  int_y.value_in(pc),
+                                                  int_z.value_in(pc),
+                                                  lm_x_o.value_in(pc),
+                                                  lm_y_o.value_in(pc),
+                                                  lm_z_o.value_in(pc),
+                                                  lm_x.value_in(pc),
+                                                  lm_y.value_in(pc),
+                                                  lm_z.value_in(pc),
+                                                  0.1)
+
+            if intersection_frac != 0.0:
+              interlopers = cluster[cluster.is_interloper == True]
               # Calculate disk speed
-              disk_spd = (lm_vx**2 + lm_vy**2 + lm_vz**2)**0.5
-              d_disk_trav = disk_spd * dt
+              # disk_spd = (lm_vx**2 + lm_vy**2 + lm_vz**2)**0.5
+              # d_disk_trav = disk_spd * dt
+              d_disk_trav = ((lm_x - lm_x_o)**2 + (lm_y - lm_y_o)**2 + (lm_z - lm_z_o)**2)**0.5
+              d_disk_trav *= intersection_frac
               eta_bub  = 0.75 * (r_disk**2) * d_disk_trav / (interloper_bubble_radius ** 3)
               inter_abs_26al = interloper_26al_rate * eta_bub * dt
               inter_abs_60fe = interloper_60fe_rate * eta_bub * dt
@@ -1002,6 +1028,17 @@ def evolve_simulation(cluster,converter,gravity,stellar,yields,metadata,t_f,Rc,b
               cluster[i].mass_60fe_agb += inter_abs_60fe
               cluster[i].mass_26al_agb_raw += inter_abs_26al
               cluster[i].mass_60fe_agb_raw += inter_abs_60fe
+  
+      if args.interloper_trajectory:
+        with open("interloper_trajectory.dat","a") as traj_file:
+          traj_t_sim = t.value_in(myr)
+          traj_t_int = interloper_time.value_in(myr)
+          traj_x,traj_y,traj_z = int_x.value_in(pc),int_y.value_in(pc),int_y.value_in(pc)
+          bary = cluster.center_of_mass()
+          bary_dist = (((int_x-bary[0])**2 + (int_y-bary[1])**2 + (int_z-bary[2])**2)**0.5).value_in(pc)
+          traj_file.write("{:.3e},{:.3e},{:.3e},{:.3e},{:.3e},{:.3e}\n".format(traj_t_sim,traj_t_int,traj_x,traj_y,traj_z,bary_dist))
+      
+  
   t_fin_interloper = time()
   if metadata.args.verbose:
     bar.write("t = {:.3f} Myr: Finished interloper, took {:.3f} sec".format(t_new.value_in(myr),
@@ -1117,6 +1154,44 @@ def calc_adaptive_timestep(cluster,hm_id,lm_id,dt,has_interloper = False):
   n_substeps = ceil((dt / int_t_min) * 1)
   print(n_substeps)
   sys.exit()
+
+def calc_intersection(x1o,y1o,z1o,
+                      x1n,y1n,z1n,
+                      x2o,y2o,z2o,
+                      x2n,y2n,z2n,
+                      r,n=1024):
+  """
+  Calculate the fraction of a step that two particles spend a certain distance apart
+  Assumes that both particles are travelling in straight lines
+  There are better ways to do this, I'm sure, but it's relatively fast and I am tired
+  Inputs:
+  - x1o,y1o,z1o: initial "old" positions of particle 1
+  - x1n,y1n,z1n: final "new" positions of particle 1
+  - x2o,y2o,z2o: initial "old" positions of particle 2
+  - x2n,y2n,z2n: final "new" positions of particle 2
+  - r: separation distance
+  - n: number of division substeps
+  Outputs:
+  - nf: step proximity fraction, as described above
+  """
+
+  x1i = np.linspace(x1o,x1n,n)
+  y1i = np.linspace(y1o,y1n,n)
+  z1i = np.linspace(z1o,z1n,n)
+  x2i = np.linspace(x2o,x2n,n)
+  y2i = np.linspace(y2o,y2n,n)
+  z2i = np.linspace(z2o,z2n,n)
+
+
+  # sys.exit()
+
+  # Do the calculation
+  ri = ((x1i-x2i)**2 + (y1i-y2i)**2 + (z1i-z2i)**2) ** 0.5
+  ni = np.array(ri <= r).sum()
+  nf = ni / n
+  return nf
+
+  
 
 def get_high_mass_star_indices(cluster):
   """
@@ -1354,7 +1429,12 @@ def generate_masses(nstars,
   if no_massive_star_requirement == False:
     if max(masses) < 13.0:
       print("No massive stars in cluster! Re-rolling!")
-      masses = generate_masses(nstars)
+      masses = generate_masses(nstars,
+                               min_mass=min_mass,
+                               max_mass=max_mass,
+                               m_lower=m_lower,
+                               m_upper=m_upper,
+                               no_massive_star_requirement=no_massive_star_requirement)
 
   ii,iii = 0,0
   for i,mass in enumerate(masses):
@@ -1367,7 +1447,7 @@ def generate_masses(nstars,
   masses = np.asarray(masses)
   return masses
 
-def spawn_interloper(cluster,interloper_mass,closest_approach_radius,interloper_velocity,time_offset,Rc):
+def spawn_interloper(cluster,interloper_mass,interloper_distance,closest_approach_radius,interloper_velocity,time_offset,Rc):
   """
   Add an additional, evolved AGB star to the simulation on a collision course with the star forming
   region.
@@ -1398,7 +1478,7 @@ def spawn_interloper(cluster,interloper_mass,closest_approach_radius,interloper_
   # Write mass
   interloper[0].mass = interloper_mass
   # Write positions
-  interloper[0].x = - 2 * Rc
+  interloper[0].x = interloper_distance
   interloper[0].y = closest_approach_radius 
   interloper[0].z = 0.0 | pc
   # Write velocities
@@ -1412,6 +1492,7 @@ def spawn_interloper(cluster,interloper_mass,closest_approach_radius,interloper_
   return cluster
 
 def init_cluster(model, nstars, Rc, SLRs,
+                 min_mass,max_mass,
                  no_massive_star_requirement=False,
                  r_disk=100.):
   """
@@ -1427,7 +1508,8 @@ def init_cluster(model, nstars, Rc, SLRs,
 
   # First, generate a series of masses
   masses = generate_masses(nstars,
-                           no_massive_star_requirement=no_massive_star_requirement)
+                           no_massive_star_requirement=no_massive_star_requirement,
+                           min_mass=min_mass,max_mass=max_mass)
   # Set basic simulation parameters
   Mcluster  = sum(masses) | msol
   # Now create the cluster
@@ -1560,6 +1642,7 @@ def main(args):
 
   if args.reload == "":
     cluster,converter = init_cluster("plummer",nstars,Rc,SLRs,
+                                     args.star_min_mass,args.star_max_mass,
                                      no_massive_star_requirement=args.no_massive_star_requirement,
                                      r_disk = args.disk_radius)
     used_checkpoint = False
@@ -1585,6 +1668,10 @@ def main(args):
       if args.interloper_radius == None:
         args.interloper_radius = uniform(0.0,args.rc)
       args.interloper_radius = args.interloper_radius | pc
+      # Convert interloper offset radius
+      if args.interloper_distance == None:
+        args.interloper_distance = 2 * args.rc
+      args.interloper_distance = - args.interloper_distance | pc
       # Convert interloper velocity
       if args.interloper_velocity == None:
         args.interloper_velocity = uniform(0.0,100.0)
@@ -1593,11 +1680,13 @@ def main(args):
       args.interloper_offset_time = args.interloper_offset_time | myr
       # Add interloper to cluster
       print("!!! Spawning an interloper with properties: !!!")
-      print("  > Mass:          {:.1f} Msol".format(args.interloper_mass.value_in(msol)))
-      print("  > Bubble radius: {:.3f} pc".format(args.interloper_bubble_radius.value_in(pc)))
-      print("  > Approach:      {:.3f} pc".format(args.interloper_radius.value_in(pc)))
-      print("  > Velocity:      {:.3f} km/s".format(args.interloper_velocity.value_in(kms)))
-      print("  > Offset:        {:.3f} Myr".format(args.interloper_offset_time.value_in(myr)))
+      print("  > Mass:             {:.1f} Msol".format(args.interloper_mass.value_in(msol)))
+      print("  > Bubble radius:    {:.3f} pc".format(args.interloper_bubble_radius.value_in(pc)))
+      print("  > Initial dist.:    {:.3f} pc".format(args.interloper_distance.value_in(pc)))
+      print("  > Close Approach:   {:.3f} pc".format(args.interloper_radius.value_in(pc)))
+      print("  > Velocity:         {:.3f} km/s".format(args.interloper_velocity.value_in(kms)))
+      print("  > Offset:           {:.3f} Myr".format(args.interloper_offset_time.value_in(myr)))
+      print("  > Write trajectory: {}".format(args.interloper_trajectory))
 
       # Read AGBs, bad code incoming
       AGBs = read_AGBs()
@@ -1612,6 +1701,7 @@ def main(args):
       # Finishing checks and balances, adding an interloper to the cluster
       cluster = spawn_interloper(cluster,
                                  args.interloper_mass,
+                                 args.interloper_distance,
                                  args.interloper_radius,
                                  args.interloper_velocity,
                                  args.interloper_offset_time,
@@ -1695,6 +1785,12 @@ if __name__ == "__main__":
   parser.add_argument("--no_massive_star_requirement",
                       action="store_true",
                       help="Do not require the formation of a massive star in the cluster (no re-rolls)")
+  parser.add_argument("--star_min_mass",
+                      type=float,default=0.01,
+                      help="Minimum mass for stars in cluster, default uses full range of Maschberger distribution (0.01 msol)")
+  parser.add_argument("--star_max_mass",
+                      type=float,default=150.0,
+                      help="Maximum mass for stars in cluster, default uses full range of Maschberger distribution (150 msol)")
   # Arguments governing AGB interlopers
   parser.add_argument("-i","--interloper",action="store_true",
                       help="Throw an interloping AGB star into the simulation")
@@ -1707,12 +1803,18 @@ if __name__ == "__main__":
   parser.add_argument("-ri","--interloper_radius",
                       type=float,default=None,
                       help="Interloper closest approach radius from barycenter in parsecs, assuming perfectly straight path, by default a random value between 0 pc and the star-forming region radius")
+  parser.add_argument("-di","--interloper_distance",
+                      type=float,default=None,
+                      help="Interloper initial distance, by default this is 2*rc.")
   parser.add_argument("-vi","--interloper_velocity",
                       type=float,default=None,
                       help="Interloper initial velocity towards the cluster in km/s, again assumes perfectly straight apth to the closest approach in a straight line, by default a random value between 1 and 100km/s")
   parser.add_argument("-ti","--interloper_offset_time",
                       type=float,default=0.0,
                       help="Time until interloper enters AGB phase in Myr, by default this is zero, star enters AGB phase at the start of the simulation")
+  parser.add_argument("-trji","--interloper_trajectory",
+                      action="store_true",
+                      help="Write AGB position to text file, agb_trajectory.dat")
 
   parser.add_argument("-t_f","--final_time",type=float,default=10.0,help="Final time to simulate to in Myr")
   parser.add_argument("-v","--verbose",action="store_true",help="Print additional statements")

@@ -74,7 +74,9 @@ plt.rcParams.update({
   "font.family": "serif",
   "font.serif": ["Computer Modern Roman"],
 })
-fig,ax = plt.subplots(1,2,figsize=(10,4))
+fig,ax = plt.subplots(2,1,figsize=(5,5),sharex=True)
+fig.subplots_adjust(hspace=0)
+
 
 # Loop through list of stellar masses
 for i,mass in enumerate(star_masses):
@@ -135,21 +137,21 @@ for i,mass in enumerate(star_masses):
                              "star_total_mass_loss"])
   df.to_csv("agb_slr_{}_msol.csv".format(int(mass.value_in(units.MSun))),index=False)
   # Plot lines
-  ax[0].plot(elapsed,al26_mass_loss_rate_arr,"C{}".format(i),label="{} M$_\\odot$ star".format(int(mass.value_in(units.MSun))))
+  ax[0].plot(elapsed,al26_mass_loss_rate_arr,"C{}".format(i),label="{}$\\,$M$_\\odot$".format(int(mass.value_in(units.MSun))))
   ax[0].plot(elapsed,fe60_mass_loss_rate_arr,"C{}".format(i),linestyle=":")
-  ax[1].plot(elapsed,al26_total_mass_loss_arr,"C{}".format(i),label="{} M$_\\odot$ star".format(int(mass.value_in(units.MSun))))
+  ax[1].plot(elapsed,al26_total_mass_loss_arr,"C{}".format(i),label="{}$\\,$M$_\\odot$".format(int(mass.value_in(units.MSun))))
   ax[1].plot(elapsed,fe60_total_mass_loss_arr,"C{}".format(i),linestyle=":")
   stellar.stop() # Finish up SeBa
 
 # Plotting
 ax[0].set_yscale("log")
 ax[1].set_yscale("log")
-ax[0].set_xlabel("AGB elapsed time (Myr)")
+# ax[0].set_xlabel("AGB elapsed time (Myr)")
 ax[1].set_xlabel("AGB elapsed time (Myr)")
 ax[0].set_ylabel("SLR yield rate (M$_\\odot\\,$yr$^{-1}$)")
 ax[1].set_ylabel("Total SLR yield (M$_\\odot$)")
-ax[0].legend()
-ax[1].legend()
+ax[0].legend(loc="upper center",ncol=4)
+# ax[1].legend()
 ax[0].grid(which='both', linestyle=":")
 ax[1].grid(which='both', linestyle=":")
-plt.savefig("plot.pdf",bbox_inches="tight")
+plt.savefig("agb_slr_yields.pdf",bbox_inches="tight")

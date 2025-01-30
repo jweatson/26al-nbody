@@ -88,7 +88,6 @@ axes[0,1].set_title("$^{60}$Fe global model")
 axes[1,0].set_title("$^{26}$Al local model")
 axes[1,1].set_title("$^{60}$Fe local model")
 
-
 # for axin axes:
   # ax.set_ylim(0,1)
   # ax.set_xscale("log")

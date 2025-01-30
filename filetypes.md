@@ -1,17 +1,5 @@
 # Filetypes
 
-## Initialisation properties
-
-Upon initialisation of the code and formation of the cluster, the programme saves the initial positions and properties of each star in the cluster
-
-As this code performs star position initialisation in a weighted random method, it is important to save these conditions for anyone attempting to replicate our data, 
-
-## Checkpoints and 
-
-As data is stored using the Pickle format, data storage and checkpoints are the same thing, on loading a specific checkpoint file, the code will read the file and continue where the code left off
-
-These are similar to the 
-
 ## `State` contents
 
 The `state` class contains the following:
