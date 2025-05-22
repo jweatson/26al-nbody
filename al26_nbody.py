@@ -49,8 +49,6 @@ from numba.core.errors import NumbaDeprecationWarning, NumbaPendingDeprecationWa
 import warnings
 warnings.simplefilter('ignore', category=NumbaDeprecationWarning)
 warnings.simplefilter('ignore', category=NumbaPendingDeprecationWarning)
-# Using scikit-spatial for line intersection things with interlopers
-from skspatial.objects import Line,Sphere
 
 # GLOBAL VALUES
 n_plot           = 100 # Number of checkpoints to make
